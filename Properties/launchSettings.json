@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "MusTool": {
+      "commandName": "Project",
+      "commandLineArgs": "play 1b2e3a2a8eefe583d2149aebb440a064 "
+    }
+  }
+}

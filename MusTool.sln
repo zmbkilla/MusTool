@@ -1,0 +1,31 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.37531.7 d17.14
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MusTool", "MusTool.csproj", "{F631AB5B-4C7A-2AAC-860B-3419860B8644}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ZamboniLib", "..\..\..\..\..\source\repos\ZamboniLib\ZamboniLib\ZamboniLib.csproj", "{84D63988-81DE-4639-8E44-FE5A25EDDC97}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{F631AB5B-4C7A-2AAC-860B-3419860B8644}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F631AB5B-4C7A-2AAC-860B-3419860B8644}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F631AB5B-4C7A-2AAC-860B-3419860B8644}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F631AB5B-4C7A-2AAC-860B-3419860B8644}.Release|Any CPU.Build.0 = Release|Any CPU
+		{84D63988-81DE-4639-8E44-FE5A25EDDC97}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{84D63988-81DE-4639-8E44-FE5A25EDDC97}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{84D63988-81DE-4639-8E44-FE5A25EDDC97}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{84D63988-81DE-4639-8E44-FE5A25EDDC97}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {B158AF9A-3878-4E7F-B995-418758F91417}
+	EndGlobalSection
+EndGlobal
