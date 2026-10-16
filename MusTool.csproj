@@ -6,6 +6,8 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>MusTool</RootNamespace>
+    <!-- Keep local folder names out of the built files (pdb paths, source paths). -->
+    <PathMap>$(MSBuildProjectDirectory)=MusTool</PathMap>
   </PropertyGroup>
 
   <ItemGroup>
