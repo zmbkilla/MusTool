@@ -59,8 +59,16 @@ public static class PlayCommand
             }
         }
         var (mus, song) = GameData.Open(musPath, ice);
-        // The song's own CPK (found next to the ice by its hashed name) goes first; extra sources are fallbacks.
-        if (song?.CpkPath is { } cpk) sources.Insert(0, cpk);
+        // The song's own CPK (found next to the ice by its hashed name) and any other songs' CPKs holding clips
+        // it lacks go first; extra sources given on the command line are fallbacks.
+        if (song != null)
+        {
+            var found = GameData.ClipSources(mus, song, out var notFound);
+            foreach (var path in found.Where(p => p != song.CpkPath))
+                Console.WriteLine($"using clips from {GameData.SongForCpk(path)}");
+            if (notFound.Count > 0) Console.WriteLine($"{notFound.Count} clip(s) not found in any CPK of the data folder");
+            sources.InsertRange(0, found);
+        }
         if (sources.Count == 0) throw new ArgumentException("play needs at least one CPK or folder with the .hca clips");
         using var library = new ClipLibrary(sources, key);
         var engine = new MusEngine(mus, library, part, section) { PlaySubClips = subClips, ApplyClipVolume = !noVolume };

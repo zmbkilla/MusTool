@@ -239,11 +239,12 @@ public sealed class MusEngine
         if (group != null)
         {
             var p = mus.Parts[part];
+            float layerGain = group.Layer?.Gain(mus.Version) ?? 1f, subLayerGain = group.SubLayer?.Gain(mus.Version) ?? 1f;
             foreach (var clip in group.Clips.Where(c => ConditionOn(p.ClipConditions, c.Condition)))
-                StartVoice(clip, started);
+                StartVoice(clip, layerGain, started);
             if (PlaySubClips)
                 foreach (var clip in group.SubClips)
-                    StartVoice(clip, started);
+                    StartVoice(clip, subLayerGain, started);
         }
 
         Events.Enqueue(new SlotInfo(part, section, phrase, sec.Phrases.Count, bar, barList.Count,
@@ -257,12 +258,22 @@ public sealed class MusEngine
         lock (EnabledConditions) return EnabledConditions.Contains(conds[index].Name);
     }
 
-    void StartVoice(MusClip clip, List<string> started)
+    void StartVoice(MusClip clip, float layerGain, List<string> started)
     {
+        if (clip.File.Length == 0) return; // legacy placeholder clips have no file
         var samples = library.Get(clip.File);
         if (samples == null) return;
-        voices.Add(new Voice(samples, ApplyClipVolume ? clip.Volume / 100f : 1f));
+        voices.Add(new Voice(samples, ApplyClipVolume ? clip.Volume / 100f * layerGain : 1f));
         started.Add(clip.File);
+    }
+
+    /// <summary>Plays one of the song's event sounds (MusFile.OneShots) right away, on top of the music.</summary>
+    public bool PlayOneShot(MusOneShot shot)
+    {
+        var samples = library.Get(shot.File);
+        if (samples == null) return false;
+        lock (gate) voices.Add(new Voice(samples, ApplyClipVolume ? Math.Clamp(shot.Volume / 100f, 0f, 1f) : 1f));
+        return true;
     }
 
     /// <summary>

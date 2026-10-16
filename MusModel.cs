@@ -13,21 +13,43 @@ namespace MusTool;
 public sealed class MusFile
 {
     /// <summary>
-    /// Format version (root+0x04). 0x0A = older layout (e.g. mu_11_bgm_dragonland),
-    /// 0x12 = newer layout with larger sections/conditions/groups and extra root data (e.g. mu_11_bgm02_boss_nea_md).
+    /// Format version (root+0x04); see docs/MUS_VERSIONS.md. 0x07-0x09 = legacy clip tree (layer/track/clip),
+    /// 0x0A-0x0C = flat clip groups (0x0B/0x0C have a wider root), 0x12 = NGS layout with extra root data.
     /// </summary>
     public byte Version { get; set; } = 0x0A;
 
-    /// <summary>Root+0x06 / +0x08 / +0x0C. Observed 0/0/0 (v0x0A) and 0/0x290/0 (v0x12).</summary>
+    /// <summary>Root+0x06 / +0x08 / +0x0C (+0x08/+0x0C only from v0x09 on). Observed 0/0/0 (v0x0A) and 0/0x290/0 (v0x12).</summary>
     public ushort RootUnk06 { get; set; }
     public uint RootUnk08 { get; set; }
     public uint RootUnk0C { get; set; }
 
+    /// <summary>v0x0B/v0x0C root+0x10. The top byte is written as OneShots.Count.</summary>
+    public uint RootUnk10 { get; set; }
+
     /// <summary>
-    /// True when root+0x0C is a pointer (always to an empty list in observed files, e.g. cafe_night)
-    /// rather than the plain value RootUnk0C (dragonland).
+    /// v0x0A/v0x12: true when root+0x0C is a pointer (to OneShots, or to the empty list) rather than the plain
+    /// value RootUnk0C. In v0x0A the top byte of RootUnk08 is then written as OneShots.Count.
     /// </summary>
     public bool RootList0C { get; set; }
+
+    /// <summary>Sounds triggered by game events rather than by the bar schedule (e.g. "NOD_hit_BDF.hca"). v0x0A-v0x0C.</summary>
+    public List<MusOneShot> OneShots { get; set; } = new();
+
+    /// <summary>v0x0C root+0x18 block. Null in other versions.</summary>
+    public MusRootInfo? RootInfo { get; set; }
+
+    /// <summary>
+    /// Legacy versions (0x07-0x09): empty clip tracks do not point at the sentinel but past the end of REL0,
+    /// at relEnd + EmptyListBase + 4*n for the n-th empty track. Preserved so files round-trip.
+    /// </summary>
+    public int? EmptyListBase { get; set; }
+
+    /// <summary>
+    /// Bytes between the REL0 and NOF0 chunks. Legacy files reserve 4 zero bytes there per empty track
+    /// (where those tracks point). Preserved as-is; null when there is none.
+    /// </summary>
+    [JsonConverter(typeof(HexBytesConverter))]
+    public byte[]? Rel0Gap { get; set; }
 
     /// <summary>
     /// The NIFL header normally stores the NOF0 size rounded up to 16; dragonland stores it unrounded.
@@ -81,6 +103,48 @@ public sealed class MusRootExtension
     /// <summary>Root+0x2C..0xB4. Observed all zero.</summary>
     [JsonConverter(typeof(HexBytesConverter))]
     public byte[] Tail { get; set; } = new byte[0x88];
+}
+
+/// <summary>0x10-byte record in the v0x0A-v0x0C root list: a sound the game fires on an event.</summary>
+public sealed class MusOneShot
+{
+    /// <summary>Observed 2, 3 and 4.</summary>
+    public uint Kind { get; set; } = 2;
+    /// <summary>Null when the condition pointer is the empty sentinel (observed with kind 4).</summary>
+    public MusCondition? Condition { get; set; }
+    /// <summary>Observed 100.0.</summary>
+    public float Volume { get; set; } = 100f;
+    public string File { get; set; } = "";
+}
+
+/// <summary>v0x0C root+0x18: { u8[4] head; Named* } where Named = { char* name; void* list (always empty) }.</summary>
+public sealed class MusRootInfo
+{
+    /// <summary>Observed 00 00 00 00, 00 01 00 00, 01 02 00 00.</summary>
+    [JsonConverter(typeof(HexBytesConverter))]
+    public byte[] Head { get; set; } = new byte[4];
+
+    /// <summary>
+    /// Null when the Named pointer is the empty sentinel. Observed "" and comma-separated song names
+    /// (boss_pd2: "mu_11_bgm_sv2,mu_11_bgm_sv1,mu_11_bgm_flt_before").
+    /// </summary>
+    public string? Name { get; set; }
+}
+
+/// <summary>Legacy (v0x07-v0x09) layer: { Track* track; data }. Every observed layer has exactly one track.</summary>
+public sealed class MusLayer
+{
+    /// <summary>
+    /// Bytes after the track pointer. v0x07: f32 volume (0.0-1.0) + 04 01 xx 00.
+    /// v0x08/v0x09: u8 volume (0-100), 04, 01, trackCount (1).
+    /// </summary>
+    [JsonConverter(typeof(HexBytesConverter))]
+    public byte[] Data { get; set; } = [100, 4, 1, 1];
+
+    /// <summary>The layer's volume as a 0-1 gain.</summary>
+    public float Gain(byte version) => version == 0x07
+        ? BitConverter.ToSingle(Data, 0)
+        : Data[0] / 100f;
 }
 
 /// <summary>0x38-byte record referenced from the v0x12 root (observed name "MusicDiscTune", twice).</summary>
@@ -187,6 +251,13 @@ public sealed class MusClipGroup
     [JsonConverter(typeof(HexBytesConverter))]
     public byte[]? Extra { get; set; }
 
+    /// <summary>Legacy only (v0x07-v0x09): the layers holding Clips / SubClips. UnkE/UnkF are unused there.</summary>
+    public MusLayer? Layer { get; set; }
+    public MusLayer? SubLayer { get; set; }
+
+    /// <summary>v0x07 only: u32 between tempo and beats. Always 0 in observed data.</summary>
+    public uint? LegacyUnk { get; set; }
+
     /// <summary>Layered stems that play together (base, M1_, M2_, SQ_, HERO_ ...).</summary>
     public List<MusClip> Clips { get; set; } = new();
 
@@ -202,13 +273,16 @@ public sealed class MusClip
     /// <summary>Probably volume, 0-100. Observed: 100 for jingles, 74-89 for stems.</summary>
     public byte Volume { get; set; } = 100;
 
+    /// <summary>v0x07 only: the volume as stored there (f32, 0.0-1.0). Written instead of Volume when set.</summary>
+    public float? VolumeF { get; set; }
+
     /// <summary>Index into the owning part's ClipConditions / SubClipConditions.</summary>
     public byte Condition { get; set; }
 
-    /// <summary>Always 1 in observed data.</summary>
+    /// <summary>Always 1 in observed flat data. Legacy: the byte after volume (v0x07 +0x08, v0x08/09 +0x05), observed 0.</summary>
     public byte Unk2 { get; set; } = 1;
 
-    /// <summary>Always 0 in observed data.</summary>
+    /// <summary>Always 0 in observed flat data. v0x07: byte +0x09, observed 0-12 (meaning unknown).</summary>
     public byte Unk3 { get; set; }
 }
 

@@ -5,6 +5,7 @@ namespace MusTool;
 
 // Binary layout (all little-endian). Pointers are u32 offsets relative to the REL0 chunk start
 // and every pointer slot is listed in NOF0. Empty lists point at a shared 0xFFFFFFFF sentinel (rel 0x10).
+// Version differences are described in docs/MUS_VERSIONS.md.
 //
 // File:
 //   NIFL header (0x20): "NIFL", 0x18, 1, rel0Offset(0x20), rel0ChunkSize, nof0Offset, nof0Size, 0
@@ -12,56 +13,73 @@ namespace MusTool;
 //   NOF0 chunk:         "NOF0", unk, entryCount-1, u32 entries[entryCount] (sorted), padded to 16
 //   NEND chunk:         "NEND", 8, 0, 0
 //
-// REL0 data (sizes: version 0x0A / version 0x12):
+// REL0 data:
 //   RootHeader (4)        { Root* root }                  <- REL0 header points here
-//   Root      (16 / 0xB4) { Part* parts; u8 version; u8 partCount; u16; u32; u32 or void* (empty list);
-//                           v12: u8[4]; void* (always empty); u8[4]; char* name; u8 tuneCount,u8[3]; Tune* tunes; char*; u8[0x88] }
-//   Tune      (- / 0x38)  see MusTune
+//   Root  v07/08 (8)      { Part* parts; u8 version; u8 partCount; u16 }
+//         v09/0A (0x10)   { ...; u32 unk08; u32 or OneShot* (v0A, count = unk08 >> 24) }
+//         v0B/0C (0x1C)   { ...; u32 unk08; u32 unk0C; u32 unk10 (count = unk10 >> 24); OneShot*; RootInfo* }
+//         v12 (0xB4)      { ...; u32; void* (empty); u8[4]; void* (always empty); u8[4]; char* name;
+//                           u8 tuneCount,u8[3]; Tune* tunes; char*; u8[0x88] }
+//   OneShot   (0x10)      { u32 kind; Condition* cond; f32 volume; char* hca }
+//   RootInfo  (8)         { u8[4]; Named* }   Named (8) { char* name; void* (always empty) }
+//   Tune      (0x38)      see MusTune
 //   Part      (12)        { Section* sections; Condition* conds; u8 sectionCount; u8 index; u8 clipCondCount; u8 subClipCondCount }
-//   Condition (8 / 0x14)  v0A: { u32 value; char* name }   v12: { char* name; u8[16] }
+//   Condition (8 / 0x14)  { u32 value; char* name }   v12: { char* name; u8[16] }
 //   Section   (8 / 0x2C)  { Phrase* phrases; u8 phraseCount; u8 type; u8 unk2; u8 unk3;  v12: char* name; u8[32] }
 //   Phrase    (8)         { Bar* bars; u32 barCount }
 //   Bar       (8)         { ClipGroup* variations; u32 variationCount }
+//   flat (v0A and later):
 //   ClipGroup (16 / 0x20) { Clip* clips; Clip* subClips; u16 tempo; u16 beats; u8 clipCount; u8 subClipCount; u8 unkE; u8 unkF;  v12: u8[16] }
 //   Clip      (8)         { char* hcaName; u8 volume; u8 condition; u8 unk2; u8 unk3 }
+//   legacy (v07-v09), ClipGroup -> Layer -> Track -> Clip* -> Clip -> char*[]:
+//   ClipGroup (0x14 / 12) { Layer* clips; Layer* subClips;  v07: u32 tempo; u32 unk; u32 beats   v08/09: u16 tempo; u16 beats }
+//   Layer     (0x0C / 8)  { Track* track;  v07: f32 volume; u8[4]   v08/09: u8 volume; u8; u8; u8 trackCount }
+//   Track     (8)         { Clip** clips; u32 clipCount }   (empty: pointer past REL0, see MusFile.EmptyListBase)
+//   Clip      (0x0C / 8)  { char** names;  v07: f32 volume; u8 unk2; u8 unk3; u8 condition; u8 0
+//                           v08/09: u8 volume; u8 unk2; u8 condition; u8 nameCount }
 //
 // Writer emits data in the same order the original tool did (bottom-up, strings last), so an
 // unmodified file round-trips byte-for-byte.
 public static class MusSerializer
 {
-    public const byte Version0A = 0x0A;
-    public const byte Version12 = 0x12;
     public const byte Version07 = 0x07;
+    public const byte Version08 = 0x08;
     public const byte Version09 = 0x09;
+    public const byte Version0A = 0x0A;
+    public const byte Version0B = 0x0B;
     public const byte Version0C = 0x0C;
+    public const byte Version12 = 0x12;
 
     const uint SentinelOffset = 0x10;
 
-    sealed record Layout(int Section, int Condition, int Group, int Root, bool Extended)
+    enum Family { Legacy07, Legacy08, Flat, Ngs }
+
+    sealed record Layout(Family Family, int Root, int Section, int Condition, int Group)
     {
+        public bool Extended => Family == Family.Ngs;
+        public bool Legacy => Family is Family.Legacy07 or Family.Legacy08;
+        public int LayerSize => Family == Family.Legacy07 ? 0x0C : 8;
+        public int LegacyClipSize => Family == Family.Legacy07 ? 0x0C : 8;
+
         public static Layout For(byte version) => version switch
         {
-            Version07 => new Layout(8, 8, 0x10, 0x10, false),
-            Version0C => new Layout(8, 8, 0x10, 0x10, false),
-            //UNK
-            Version09 => new Layout(8, 8, 0x10, 0x10, true),
-            Version0A => new Layout(8, 8, 0x10, 0x10, false),
-            //NGS
-            Version12 => new Layout(0x2C, 0x14, 0x20, 0xB4, true),
-
-
+            Version07 => new Layout(Family.Legacy07, 0x08, 8, 8, 0x14),
+            Version08 => new Layout(Family.Legacy08, 0x08, 8, 8, 0x0C),
+            Version09 => new Layout(Family.Legacy08, 0x10, 8, 8, 0x0C),
+            Version0A => new Layout(Family.Flat, 0x10, 8, 8, 0x10),
+            Version0B or Version0C => new Layout(Family.Flat, 0x1C, 8, 8, 0x10),
+            Version12 => new Layout(Family.Ngs, 0xB4, 0x2C, 0x14, 0x20),
             _ => throw new NotSupportedException(
-                $"Unsupported .mus version 0x{version:X2} (known: 0x0A, 0x12). A sample of this file is needed to add it."),
+                $"Unsupported .mus version 0x{version:X2} (known: 0x07-0x0C, 0x12). A sample of this file is needed to add it."),
         };
     }
 
     // ---------------------------------------------------------------- reading
 
     public static MusFile Read(string path) => Read(File.ReadAllBytes(path));
-    public static MusFile ReadIce(byte[] file) => Read(file);
 
     public static MusFile Read(byte[] data)
-     {
+    {
         if (data.Length < 0x20 || Encoding.ASCII.GetString(data, 0, 4) != "NIFL")
             throw new InvalidDataException("Not a NIFL file.");
 
@@ -84,19 +102,45 @@ public static class MusSerializer
         {
             Version = r.U8(root + 4),
             RootUnk06 = r.U16(root + 6),
-            RootUnk08 = r.U32(root + 8),
-            RootUnk0C = r.U32(root + 12),
-            RootList0C = pointerSlots.Contains(root + 12),
             Nof0Unk = U32(data, nofOffset + 4),
             Nof0SizeUnpadded = U32(data, 0x18) % 16 != 0,
         };
+        int gap = nofOffset - (relBase + relEnd);
+        if (gap > 0) mus.Rel0Gap = data.AsSpan(relBase + relEnd, gap).ToArray();
+        var layout = Layout.For(mus.Version);
+        var ctx = new ReadContext(r, layout, mus, relEnd);
+
+        if (layout.Root >= 0x10)
+        {
+            mus.RootUnk08 = r.U32(root + 8);
+            mus.RootUnk0C = r.U32(root + 12);
+            mus.RootList0C = pointerSlots.Contains(root + 12);
+        }
         if (mus.RootList0C)
         {
-            if (mus.RootUnk0C != SentinelOffset)
-                throw new NotSupportedException("Root list at +0x0C is not empty in this file; its format is unknown. A sample is needed.");
+            uint list = mus.RootUnk0C;
             mus.RootUnk0C = 0;
+            if (layout.Extended && list != SentinelOffset)
+                throw new NotSupportedException("Root list at +0x0C is not empty in this file; its format is unknown. A sample is needed.");
+            if (!layout.Extended) ReadOneShots(r, list, (int)(mus.RootUnk08 >> 24), mus.OneShots);
         }
-        var layout = Layout.For(mus.Version);
+        if (layout.Root == 0x1C)
+        {
+            mus.RootUnk10 = r.U32(root + 0x10);
+            ReadOneShots(r, r.U32(root + 0x14), (int)(mus.RootUnk10 >> 24), mus.OneShots);
+            uint info = r.U32(root + 0x18);
+            if (info != SentinelOffset)
+            {
+                uint named = r.U32(info + 4);
+                mus.RootInfo = new MusRootInfo { Head = r.Bytes(info, 4) };
+                if (named != SentinelOffset)
+                {
+                    if (r.U32(named + 4) != SentinelOffset)
+                        throw new NotSupportedException("Root info list is not empty in this file; its format is unknown. A sample is needed.");
+                    mus.RootInfo.Name = r.Str(r.U32(named));
+                }
+            }
+        }
 
         if (layout.Extended)
         {
@@ -131,7 +175,7 @@ public static class MusSerializer
                 uint c = conds + (uint)(ci * layout.Condition);
                 var cond = layout.Extended
                     ? new MusCondition { Name = r.Str(r.U32(c)), Extra = r.Bytes(c + 4, 16) }
-                    : new MusCondition { Value = r.U32(c), Name = r.Str(r.U32(c + 4)) };
+                    : ReadCondition(r, c);
                 (ci < nClipCond ? part.ClipConditions : part.SubClipConditions).Add(cond);
             }
 
@@ -156,7 +200,10 @@ public static class MusSerializer
                         var bar = new MusBar();
                         uint groups = r.U32(b);
                         for (uint gi = 0; gi < r.U32(b + 4); gi++)
-                            bar.Variations.Add(ReadGroup(r, groups + gi * (uint)layout.Group, layout));
+                        {
+                            uint g = groups + gi * (uint)layout.Group;
+                            bar.Variations.Add(layout.Legacy ? ReadLegacyGroup(ctx, g) : ReadGroup(r, g, layout));
+                        }
                         phrase.Bars.Add(bar);
                     }
                     section.Phrases.Add(phrase);
@@ -172,6 +219,26 @@ public static class MusSerializer
         while (trailerEnd > trailerStart && data[relBase + trailerEnd - 1] == 0) trailerEnd--;
         mus.Trailer = data.AsSpan(relBase + trailerStart, Math.Max(0, trailerEnd - trailerStart)).ToArray();
         return mus;
+    }
+
+    sealed record ReadContext(RelReader R, Layout Layout, MusFile Mus, int RelEnd);
+
+    static MusCondition ReadCondition(RelReader r, uint c) => new() { Value = r.U32(c), Name = r.Str(r.U32(c + 4)) };
+
+    static void ReadOneShots(RelReader r, uint list, int count, List<MusOneShot> into)
+    {
+        if (list == SentinelOffset) return;
+        for (int i = 0; i < count; i++)
+        {
+            uint o = list + (uint)i * 0x10;
+            into.Add(new MusOneShot
+            {
+                Kind = r.U32(o),
+                Condition = r.U32(o + 4) is var c && c != SentinelOffset ? ReadCondition(r, c) : null,
+                Volume = r.F32(o + 8),
+                File = r.Str(r.U32(o + 12)),
+            });
+        }
     }
 
     static MusTune ReadTune(RelReader r, uint t) => new()
@@ -223,6 +290,69 @@ public static class MusSerializer
         }
     }
 
+    static MusClipGroup ReadLegacyGroup(ReadContext ctx, uint g)
+    {
+        var r = ctx.R;
+        var group = new MusClipGroup();
+        if (ctx.Layout.Family == Family.Legacy07)
+        {
+            group.Tempo = checked((ushort)r.U32(g + 8));
+            group.LegacyUnk = r.U32(g + 12);
+            group.Beats = checked((ushort)r.U32(g + 16));
+        }
+        else
+        {
+            group.Tempo = r.U16(g + 8);
+            group.Beats = r.U16(g + 10);
+        }
+        group.Layer = ReadLayer(ctx, r.U32(g), group.Clips);
+        group.SubLayer = ReadLayer(ctx, r.U32(g + 4), group.SubClips);
+        return group;
+    }
+
+    static MusLayer ReadLayer(ReadContext ctx, uint l, List<MusClip> into)
+    {
+        var r = ctx.R;
+        bool v07 = ctx.Layout.Family == Family.Legacy07;
+        var layer = new MusLayer { Data = r.Bytes(l + 4, ctx.Layout.LayerSize - 4) };
+        if (!v07 && layer.Data[3] != 1)
+            throw new NotSupportedException($"Layer with {layer.Data[3]} tracks; only single-track layers are known. A sample is needed.");
+
+        uint track = r.U32(l);
+        uint list = r.U32(track), count = r.U32(track + 4);
+        if (count == 0)
+        {
+            ctx.Mus.EmptyListBase ??= (int)(list - ctx.RelEnd);
+            return layer;
+        }
+        for (uint i = 0; i < count; i++)
+        {
+            uint c = r.U32(list + i * 4);
+            uint names = r.U32(c);
+            var clip = new MusClip { File = r.Str(r.U32(names)) };
+            if (v07)
+            {
+                clip.VolumeF = r.F32(c + 4);
+                clip.Volume = (byte)Math.Clamp(Math.Round(clip.VolumeF.Value * 100), 0, 255);
+                clip.Unk2 = r.U8(c + 8);
+                clip.Unk3 = r.U8(c + 9);
+                clip.Condition = r.U8(c + 10);
+                if (r.U8(c + 11) != 0)
+                    throw new NotSupportedException($"v0x07 clip {clip.File} has a non-zero last byte. A sample is needed.");
+            }
+            else
+            {
+                clip.Volume = r.U8(c + 4);
+                clip.Unk2 = r.U8(c + 5);
+                clip.Condition = r.U8(c + 6);
+                if (r.U8(c + 7) != 1)
+                    throw new NotSupportedException($"Clip {clip.File} lists {r.U8(c + 7)} file names; only 1 is known. A sample is needed.");
+            }
+            into.Add(clip);
+        }
+        return layer;
+    }
+
     sealed class RelReader(byte[] data, int relBase)
     {
         public uint StringsEnd { get; private set; }
@@ -251,6 +381,8 @@ public static class MusSerializer
         var layout = Layout.For(mus.Version);
         if (layout.Extended && mus.Extension is null)
             throw new InvalidDataException("Version 0x12 files need an Extension block.");
+        if (mus.OneShots.Count > 0 && !(layout.Root == 0x1C || (layout.Root == 0x10 && layout.Family == Family.Flat && mus.RootList0C)))
+            throw new InvalidDataException($"One-shot sounds need version 0x0B/0x0C, or 0x0A with RootList0C set (this file is 0x{mus.Version:X2}).");
 
         var w = new RelWriter();
         w.Bytes("REL0"u8);
@@ -268,16 +400,27 @@ public static class MusSerializer
                     var groupArrays = new List<uint>();
                     foreach (var bar in phrase.Bars)
                     {
-                        var lists = new List<(uint clips, uint subs)>();
-                        foreach (var g in bar.Variations)
-                            lists.Add((WriteClips(w, g.Clips), WriteClips(w, g.SubClips)));
+                        if (layout.Legacy)
+                        {
+                            // As in the flat layout: all variations' clip layers, then all their sub-clip layers.
+                            var layers = bar.Variations.Select(g => WriteLayer(w, layout, g.Layer, g.Clips)).ToList();
+                            var subLayers = bar.Variations.Select(g => WriteLayer(w, layout, g.SubLayer, g.SubClips)).ToList();
+                            groupArrays.Add(bar.Variations.Count == 0 ? SentinelOffset : w.Pos);
+                            for (int i = 0; i < bar.Variations.Count; i++)
+                                WriteLegacyGroup(w, layout, bar.Variations[i], layers[i], subLayers[i]);
+                            continue;
+                        }
+
+                        // All variations' clip lists come before all their sub-clip lists.
+                        var clipLists = bar.Variations.Select(g => WriteClips(w, g.Clips)).ToList();
+                        var subLists = bar.Variations.Select(g => WriteClips(w, g.SubClips)).ToList();
 
                         groupArrays.Add(bar.Variations.Count == 0 ? SentinelOffset : w.Pos);
                         for (int i = 0; i < bar.Variations.Count; i++)
                         {
                             var g = bar.Variations[i];
-                            w.Ptr(lists[i].clips);
-                            w.Ptr(lists[i].subs);
+                            w.Ptr(clipLists[i]);
+                            w.Ptr(subLists[i]);
                             w.U16(g.Tempo);
                             w.U16(g.Beats);
                             w.U8(Count(g.Clips.Count, "clips in a group"));
@@ -349,7 +492,7 @@ public static class MusSerializer
             partArrays.Add((sections, condArray));
         }
 
-        // 4. Part array, (v12) tunes, root, root header.
+        // 4. Part array, root lists (one-shots, root info, v12 tunes), root, root header.
         uint partsOffset = mus.Parts.Count == 0 ? SentinelOffset : w.Pos;
         for (int i = 0; i < mus.Parts.Count; i++)
         {
@@ -360,6 +503,43 @@ public static class MusSerializer
             w.U8(part.Index);
             w.U8(Count(part.ClipConditions.Count, "clip conditions"));
             w.U8(Count(part.SubClipConditions.Count, "sub-clip conditions"));
+        }
+
+        uint oneShotsOffset = SentinelOffset;
+        if (mus.OneShots.Count > 0)
+        {
+            var condOffsets = new List<uint>();
+            foreach (var o in mus.OneShots)
+            {
+                if (o.Condition is not { } c) { condOffsets.Add(SentinelOffset); continue; }
+                condOffsets.Add(w.Pos);
+                w.U32(c.Value);
+                w.StrPtr(c.Name);
+            }
+            oneShotsOffset = w.Pos;
+            for (int i = 0; i < mus.OneShots.Count; i++)
+            {
+                var o = mus.OneShots[i];
+                w.U32(o.Kind);
+                w.Ptr(condOffsets[i]);
+                w.F32(o.Volume);
+                w.StrPtr(o.File);
+            }
+        }
+
+        uint rootInfoOffset = SentinelOffset;
+        if (layout.Root == 0x1C && mus.RootInfo is { } info)
+        {
+            uint named = SentinelOffset;
+            if (info.Name != null)
+            {
+                named = w.Pos;
+                w.StrPtr(info.Name);
+                w.Ptr(SentinelOffset);
+            }
+            rootInfoOffset = w.Pos;
+            w.Fixed(info.Head, 4);
+            w.Ptr(named);
         }
 
         var ext = mus.Extension;
@@ -375,9 +555,23 @@ public static class MusSerializer
         w.U8(mus.Version);
         w.U8(Count(mus.Parts.Count, "parts"));
         w.U16(mus.RootUnk06);
-        w.U32(mus.RootUnk08);
-        if (mus.RootList0C) w.Ptr(SentinelOffset);
-        else w.U32(mus.RootUnk0C);
+        if (layout.Root == 0x10 && layout.Family == Family.Flat && mus.RootList0C)
+        {
+            w.U32(WithCount(mus.RootUnk08, mus.OneShots.Count));
+            w.Ptr(oneShotsOffset);
+        }
+        else if (layout.Root >= 0x10)
+        {
+            w.U32(mus.RootUnk08);
+            if (mus.RootList0C) w.Ptr(SentinelOffset);
+            else w.U32(mus.RootUnk0C);
+        }
+        if (layout.Root == 0x1C)
+        {
+            w.U32(WithCount(mus.RootUnk10, mus.OneShots.Count));
+            w.Ptr(oneShotsOffset);
+            w.Ptr(rootInfoOffset);
+        }
         if (layout.Extended)
         {
             w.Fixed(ext!.Unk10, 4);
@@ -402,9 +596,11 @@ public static class MusSerializer
 
         w.Patch(4, w.Pos - 8);
         w.Patch(8, rootHeader);
+        w.PatchEmptyLists((uint)((int)w.Pos + (mus.EmptyListBase ?? 0)));
 
         // ---- assemble NIFL container
-        byte[] rel = w.ToArray();
+        byte[] rel = [.. w.ToArray(), .. mus.Rel0Gap ?? []];
+        int relChunk = (int)w.Pos;
         var pointers = w.Pointers.OrderBy(p => p).ToArray();
         int nofDataSize = 12 + pointers.Length * 4;
         int nofChunk = (int)Align((uint)nofDataSize, 16);
@@ -416,7 +612,7 @@ public static class MusSerializer
         BinaryPrimitives.WriteUInt32LittleEndian(span[0x04..], 0x18);
         BinaryPrimitives.WriteUInt32LittleEndian(span[0x08..], 1);
         BinaryPrimitives.WriteUInt32LittleEndian(span[0x0C..], 0x20);
-        BinaryPrimitives.WriteUInt32LittleEndian(span[0x10..], (uint)rel.Length);
+        BinaryPrimitives.WriteUInt32LittleEndian(span[0x10..], (uint)relChunk);
         BinaryPrimitives.WriteUInt32LittleEndian(span[0x14..], (uint)(0x20 + rel.Length));
         BinaryPrimitives.WriteUInt32LittleEndian(span[0x18..], niflNofSize);
         rel.CopyTo(span[0x20..]);
@@ -435,6 +631,8 @@ public static class MusSerializer
         BinaryPrimitives.WriteUInt32LittleEndian(nend[4..], 8);
         return file;
     }
+
+    static uint WithCount(uint value, int count) => (value & 0x00FFFFFF) | ((uint)Count(count, "one-shot sounds") << 24);
 
     static void WriteTune(RelWriter w, MusTune t)
     {
@@ -469,6 +667,66 @@ public static class MusSerializer
         return start;
     }
 
+    /// <summary>Legacy layer subtree: per clip its name array then the clip, then the Clip* array, Track and Layer.</summary>
+    static uint WriteLayer(RelWriter w, Layout layout, MusLayer? layer, List<MusClip> clips)
+    {
+        bool v07 = layout.Family == Family.Legacy07;
+        var clipOffsets = new List<uint>();
+        foreach (var c in clips)
+        {
+            uint names = w.Pos;
+            w.StrPtr(c.File);
+            clipOffsets.Add(w.Pos);
+            w.Ptr(names);
+            if (v07)
+            {
+                w.F32(c.VolumeF ?? c.Volume / 100f);
+                w.U8(c.Unk2);
+                w.U8(c.Unk3);
+                w.U8(c.Condition);
+                w.U8(0);
+            }
+            else
+            {
+                w.U8(c.Volume);
+                w.U8(c.Unk2);
+                w.U8(c.Condition);
+                w.U8(1);
+            }
+        }
+        uint array = w.Pos;
+        foreach (var o in clipOffsets) w.Ptr(o);
+
+        uint track = w.Pos;
+        if (clips.Count == 0) w.EmptyListPtr();
+        else w.Ptr(array);
+        w.U32((uint)clips.Count);
+
+        uint at = w.Pos;
+        w.Ptr(track);
+        var data = (byte[])Fixed(layer?.Data ?? (v07 ? [0, 0, 0x80, 0x3F, 4, 1, 0, 0] : [100, 4, 1, 1]), layout.LayerSize - 4).Clone();
+        if (!v07) data[3] = 1; // track count
+        w.Bytes(data);
+        return at;
+    }
+
+    static void WriteLegacyGroup(RelWriter w, Layout layout, MusClipGroup g, uint layer, uint subLayer)
+    {
+        w.Ptr(layer);
+        w.Ptr(subLayer);
+        if (layout.Family == Family.Legacy07)
+        {
+            w.U32(g.Tempo);
+            w.U32(g.LegacyUnk ?? 0);
+            w.U32(g.Beats);
+        }
+        else
+        {
+            w.U16(g.Tempo);
+            w.U16(g.Beats);
+        }
+    }
+
     static byte Count(int n, string what) =>
         n <= byte.MaxValue ? (byte)n : throw new InvalidDataException($"Too many {what}: {n} (max 255).");
 
@@ -485,6 +743,7 @@ public static class MusSerializer
     {
         byte[] buf = new byte[0x10000];
         readonly List<(uint at, string s)> stringFixups = new();
+        readonly List<uint> emptyListFixups = new();
 
         public uint Pos { get; private set; }
         public List<uint> Pointers { get; } = new();
@@ -507,6 +766,14 @@ public static class MusSerializer
         public void PtrRaw(uint value) { Pointers.Add(Pos); U32(value); }
 
         public void StrPtr(string s) { stringFixups.Add((Pos, s)); Ptr(0); }
+
+        /// <summary>Legacy empty track pointer; patched by <see cref="PatchEmptyLists"/> once the REL0 size is known.</summary>
+        public void EmptyListPtr() { emptyListFixups.Add(Pos); Ptr(0); }
+
+        public void PatchEmptyLists(uint first)
+        {
+            for (int i = 0; i < emptyListFixups.Count; i++) Patch(emptyListFixups[i], first + (uint)i * 4);
+        }
 
         public void FlushStrings()
         {

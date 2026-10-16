@@ -16,6 +16,15 @@ if (ice && args[0].ToLowerInvariant() != "play")
     args = args.Where(a => !a.Equals("--ice", StringComparison.OrdinalIgnoreCase)).ToArray();
 MusFile Open(string arg) => GameData.Open(arg, ice).mus;
 
+// --data <folder> overrides the saved data folder for this run only.
+int dataAt = Array.FindIndex(args, a => a.Equals("--data", StringComparison.OrdinalIgnoreCase));
+if (dataAt >= 0)
+{
+    if (dataAt + 1 >= args.Length) throw new ArgumentException("--data needs a folder");
+    GameData.DataFolderOverride = Path.GetFullPath(args[dataAt + 1]);
+    args = args.Where((_, i) => i != dataAt && i != dataAt + 1).ToArray();
+}
+
 try
 {
     switch (args[0].ToLowerInvariant())
@@ -28,6 +37,24 @@ try
             foreach (var name in AllClips(Open(args[1])).Select(c => c.File).Distinct().Order())
                 Console.WriteLine(name);
             return 0;
+
+        case "clips" when args.Length == 3 && args[2] == "--check":
+        {
+            // clips <song> --ice --check: where does each referenced clip come from?
+            var (mus, song) = GameData.Open(args[1], ice);
+            if (song == null) throw new ArgumentException("--check needs --ice");
+            int total = GameData.ReferencedClips(mus).Count;
+            var sources = GameData.ClipSources(mus, song, out var notFound);
+            if (song.CpkPath == null) Console.WriteLine($"{song.Song} has no CPK of its own ({GameData.CpkHash(song.Song)} is not in the data folder)");
+            foreach (var path in sources)
+            {
+                using var cpk = new CpkArchive(path);
+                Console.WriteLine($"{GameData.SongForCpk(path),-32} {Path.GetFileName(path)}{(path == song.CpkPath ? "  (own)" : "")}");
+            }
+            foreach (var n in notFound) Console.WriteLine($"missing everywhere: {n}");
+            Console.WriteLine($"{total - notFound.Count}/{total} clips available from {sources.Count} CPK(s)");
+            return notFound.Count == 0 ? 0 : 1;
+        }
 
         case "export" when args.Length is 2 or 3:
         {
@@ -118,7 +145,7 @@ try
         }
 
         case "scan" when args.Length is 1 or 2:
-            return Scan(args.Length == 2 ? args[1] : null);
+            return Scan(args.Length == 2 ? args[1] : null, json);
 
         case "dump" when args.Length is 2 or 4:
         {
@@ -146,6 +173,19 @@ try
             {
                 byte[] w = MusSerializer.Write(MusSerializer.Read(d));
                 int diff = FirstDifference(d, w);
+                if (diff >= 0 && diff < rel + 8) // header/size fields differ: report the first difference in the data as well
+                {
+                    int inner = FirstDifference(d.AsSpan(rel + 8).ToArray(), w.AsSpan(rel + 8).ToArray());
+                    if (inner >= 0) Console.WriteLine($"first data difference at rel 0x{inner + 8:X}");
+                    int wn = BitConverter.ToInt32(w, 0x14);
+                    Console.WriteLine($"NOF0 entries: original {BitConverter.ToInt32(d, nof + 8) + 1}, rewrite {BitConverter.ToInt32(w, wn + 8) + 1}");
+                    for (int i = 0; i < BitConverter.ToInt32(d, nof + 8) + 1; i++)
+                        if (BitConverter.ToInt32(d, nof + 12 + i * 4) != BitConverter.ToInt32(w, wn + 12 + i * 4))
+                        {
+                            Console.WriteLine($"NOF0 #{i}: original 0x{BitConverter.ToInt32(d, nof + 12 + i * 4):X} (prev 0x{BitConverter.ToInt32(d, nof + 8 + i * 4):X}, next 0x{BitConverter.ToInt32(d, nof + 16 + i * 4):X}), rewrite 0x{BitConverter.ToInt32(w, wn + 12 + i * 4):X}");
+                            break;
+                        }
+                }
                 Console.WriteLine(diff < 0 ? "round-trip OK" : $"first difference at file 0x{diff:X} (rel 0x{diff - rel:X}), lengths {d.Length}/{w.Length}");
             }
             catch (Exception e) { Console.WriteLine($"parse failed: {e.Message}"); }
@@ -168,7 +208,8 @@ static int Usage()
         MusTool - PSO2 .mus (adaptive BGM) editor
 
           info     <file.mus>                         print the part/section/phrase tree
-          clips    <file.mus>                         list every referenced .hca file
+          clips    <file.mus> [--check]               list every referenced .hca file (--check: with --ice, list
+                                                      the ones missing from the song's CPK)
           export   <file.mus> [out.json]              convert to editable JSON
           import   <in.json> <out.mus>                build a .mus from JSON
           rename   <in.mus> <out.mus> <find> <repl>   substring-replace clip file names
@@ -181,12 +222,13 @@ static int Usage()
 
           --ice    any <file.mus> above may instead be an ice file, a hashed name or a song name
                    (mu_11_bgm_dragonland or just dragonland) looked up in the data folder
+          --data <folder>   use this data folder for this run instead of the saved one
         """);
     Console.Error.WriteLine(PlayCommand.Usage);
     return 2;
 }
 
-static int Scan(string? only)
+static int Scan(string? only, JsonSerializerOptions json)
 {
     string dir = GameData.DataFolder ?? throw new ArgumentException("no data folder set; run: MusTool datadir <path>");
     var byVersion = new SortedDictionary<byte, (int ok, int failed)>();
@@ -198,19 +240,20 @@ static int Scan(string? only)
         byte version = 0;
         try
         {
-            var loaded = GameData.LoadIce(ice);
+            var loaded = GameData.LoadIce(ice, song);
             byte[] data = loaded.MusBytes;
             int rel = BitConverter.ToInt32(data, 0x0C);
             int root = BitConverter.ToInt32(data, rel + BitConverter.ToInt32(data, rel + 8));
             version = data[rel + root + 4];
             var mus = MusSerializer.Read(data);
-            bool same = MusSerializer.Write(mus).AsSpan().SequenceEqual(data);
+            bool same = MusSerializer.Write(mus).AsSpan().SequenceEqual(data)
+                        && MusSerializer.Write(JsonSerializer.Deserialize<MusFile>(JsonSerializer.Serialize(mus, json), json)!).AsSpan().SequenceEqual(data);
             var c = byVersion.GetValueOrDefault(version);
             byVersion[version] = same ? (c.ok + 1, c.failed) : (c.ok, c.failed + 1);
             Console.WriteLine($"{song,-32} v0x{version:X2}  {mus.Parts.Count} parts  {mus.Parts.Sum(p => p.Sections.Count),3} sections  " +
-                              $"{(same ? "round-trip OK" : "round-trip MISMATCH")}{(loaded.CpkPath == null ? "  (no cpk)" : "")}");
+                              $"{(same ? "round-trip OK (binary + JSON)" : "round-trip MISMATCH")}{(loaded.CpkPath == null ? "  (no cpk)" : "")}");
         }
-        catch (Exception e) when (e is InvalidDataException or NotSupportedException or IndexOutOfRangeException or ArgumentException)
+        catch (Exception e) when (e is InvalidDataException or NotSupportedException or IndexOutOfRangeException or ArgumentException or OverflowException)
         {
             var c = byVersion.GetValueOrDefault(version);
             byVersion[version] = (c.ok, c.failed + 1);
@@ -237,6 +280,9 @@ static void PrintInfo(MusFile mus)
 {
     if (mus.Extension is { } ext) Console.WriteLine($"name: {ext.Name}");
     Console.WriteLine($"version 0x{mus.Version:X2}, {mus.Parts.Count} parts, {AllClips(mus).Select(c => c.File).Distinct().Count()} distinct clips");
+    foreach (var o in mus.OneShots)
+        Console.WriteLine($"one-shot: {o.File} (kind {o.Kind}, condition {o.Condition?.Name ?? "-"}, volume {o.Volume})");
+    if (mus.RootInfo?.Name is { Length: > 0 } linked) Console.WriteLine($"root info: {linked}");
     for (int pi = 0; pi < mus.Parts.Count; pi++)
     {
         var part = mus.Parts[pi];
