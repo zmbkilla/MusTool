@@ -10,11 +10,13 @@
 
   <ItemGroup>
     <PackageReference Include="NAudio" Version="2.2.1" />
+    <PackageReference Include="Photino.NET" Version="4.0.16" />
     <PackageReference Include="VGAudio" Version="2.2.1" />
   </ItemGroup>
 
   <ItemGroup>
     <EmbeddedResource Include="songs.txt" LogicalName="MusTool.songs.txt" />
+    <EmbeddedResource Include="ui\index.html" LogicalName="MusTool.ui.index.html" />
   </ItemGroup>
 
   <ItemGroup>

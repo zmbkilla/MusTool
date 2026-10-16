@@ -60,7 +60,7 @@ public static class GameData
     }
 
     /// <summary>
-    /// Turns what the user typed into an ice path. Accepts an existing file path, a hashed file name, a song name
+    /// Turns what the user typed into an ice path. Accepts a full path to an ice, an ice's (md5) name in the data folder, a song name
     /// ("mu_11_bgm_dragonland", with or without .ice/.mus/.cpk) or a short name ("dragonland" -> mu_11_bgm_dragonland).
     /// </summary>
     public static string ResolveIce(string arg, string? dataFolder = null) => ResolveIce(arg, out _, dataFolder);

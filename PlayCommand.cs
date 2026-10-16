@@ -14,7 +14,7 @@ public static class PlayCommand
         "             --key HEX                HCA key (default PSO2 CC55463930DBE1AB)\n" +
         "             --out f.wav --seconds S  render to a WAV instead of playing\n" +
         "             --switch T:S | T:P.S     (with --out) request a switch at T seconds\n" +
-        "             --ice                    <file.mus> is an ice / song name; its CPK is found automatically";
+        "             --ice                    <file.mus> is a song name or ice; its CPK(s) are found automatically";
 
     public static int Run(string[] args)
     {

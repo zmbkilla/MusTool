@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MusTool</title>
+<style>
+:root {
+  --bg: #111318; --panel: #181b22; --panel2: #1f232c; --line: #2a2f3a; --text: #e6e8ee; --dim: #8a91a3;
+  --accent: #5aa9ff; --accent-weak: rgba(90,169,255,.16); --queued: #f2b84b; --queued-weak: rgba(242,184,75,.14);
+  --good: #55c08a; --warn: #f2b84b; --bad: #ef6b6b; --radius: 8px;
+  --t0: #8b7cf6; --t1: #5aa9ff; --t2: #e58ac8; --t3: #f2b84b; --t4: #55c08a; --t8: #6b7280; --t9: #38bdb0;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f4f5f8; --panel: #ffffff; --panel2: #f0f2f6; --line: #dde1e8; --text: #1b1f27; --dim: #5d6576;
+    --accent: #1f6fd1; --accent-weak: rgba(31,111,209,.12); --queued: #b7790f; --queued-weak: rgba(183,121,15,.12);
+    color-scheme: light;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--text); font: 13px/1.4 "Segoe UI", system-ui, sans-serif; overflow: hidden; }
+button { font: inherit; color: inherit; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+input[type=search], input[type=text] { font: inherit; color: inherit; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; width: 100%; outline: none; }
+input:focus { border-color: var(--accent); }
+.app { display: grid; grid-template-columns: 250px 1fr 290px; height: 100vh; }
+aside, main { min-height: 0; }
+aside { background: var(--panel); display: flex; flex-direction: column; }
+aside.left { border-right: 1px solid var(--line); }
+aside.right { border-left: 1px solid var(--line); overflow-y: auto; }
+.pad { padding: 12px; }
+h2 { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); margin: 0 0 8px; }
+.folder { font-size: 11px; color: var(--dim); word-break: break-all; margin: 4px 0 8px; }
+.songs { overflow-y: auto; flex: 1; padding: 0 6px 10px; }
+.song { display: flex; justify-content: space-between; gap: 6px; padding: 5px 8px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+.song:hover { background: var(--panel2); }
+.song.active { background: var(--accent-weak); color: var(--accent); }
+.song.absent { color: var(--dim); opacity: .5; cursor: default; }
+.song small { color: var(--dim); }
+main { display: flex; flex-direction: column; overflow: hidden; }
+header { padding: 12px 16px 10px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.title { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.title h1 { font-size: 18px; margin: 0; font-weight: 600; }
+.chip { display: inline-block; padding: 1px 7px; border-radius: 99px; font-size: 11px; background: var(--panel2); border: 1px solid var(--line); color: var(--dim); }
+.chip.warn { color: var(--warn); border-color: var(--warn); }
+.transport { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+.transport .play { width: 38px; height: 34px; font-size: 15px; padding: 0; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; background: transparent; }
+.seg button.on { background: var(--accent-weak); color: var(--accent); }
+.now { font-variant-numeric: tabular-nums; display: flex; gap: 14px; align-items: center; color: var(--dim); }
+.now b { color: var(--text); font-weight: 600; }
+.slotbar { width: 120px; height: 6px; background: var(--panel2); border-radius: 3px; overflow: hidden; }
+.slotbar div { height: 100%; width: 0; background: var(--accent); }
+.pending { color: var(--queued); }
+.tabs { display: flex; gap: 4px; padding: 10px 16px 0; border-bottom: 1px solid var(--line); overflow-x: auto; background: var(--panel); }
+.tab { border: 1px solid transparent; border-bottom: 0; border-radius: 8px 8px 0 0; padding: 7px 12px 8px; cursor: pointer; white-space: nowrap; color: var(--dim); position: relative; }
+.tab:hover { color: var(--text); }
+.tab.sel { background: var(--bg); border-color: var(--line); color: var(--text); margin-bottom: -1px; }
+.tab .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-left: 6px; vertical-align: middle; }
+.tab .dot.playing { background: var(--accent); }
+.tab .dot.queued { background: var(--queued); }
+.content { flex: 1; overflow-y: auto; padding: 14px 16px 24px; }
+.legend { display: flex; gap: 12px; flex-wrap: wrap; color: var(--dim); font-size: 11px; margin-bottom: 10px; }
+.legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
+.card { position: relative; background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--tc, var(--line)); border-radius: var(--radius); padding: 8px 10px 10px; cursor: pointer; overflow: hidden; outline: none; }
+.card:hover { border-color: var(--accent); border-left-color: var(--tc); }
+.card.sel { box-shadow: 0 0 0 2px var(--accent-weak); }
+.card.playing { background: var(--accent-weak); border-color: var(--accent); border-left-color: var(--tc); }
+.card.queued { border-style: dashed; border-color: var(--queued); border-left-style: solid; background: var(--queued-weak); }
+.card .row { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
+.card .num { font-weight: 600; font-size: 14px; }
+.card .type { font-size: 11px; color: var(--tc); font-weight: 600; }
+.card .meta { color: var(--dim); font-size: 11px; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.card .clip { font-size: 11px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 4px; }
+.card .prog { position: absolute; left: 0; bottom: 0; height: 3px; background: var(--accent); width: 0; }
+.card .flag { font-size: 10px; color: var(--queued); font-weight: 600; }
+.detail { margin-top: 18px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+.detail .dh { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--line); gap: 10px; flex-wrap: wrap; }
+.detail .dh h3 { margin: 0; font-size: 14px; }
+.phrase { padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.phrase:last-child { border-bottom: 0; }
+.phrase .ph { color: var(--dim); font-size: 11px; margin-bottom: 6px; }
+.bars { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 6px; }
+.bar { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; background: var(--panel2); font-size: 11px; position: relative; overflow: hidden; }
+.bar.now { border-color: var(--accent); background: var(--accent-weak); }
+.bar .bh { display: flex; justify-content: space-between; color: var(--dim); margin-bottom: 3px; }
+.bar .c { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bar .c.sub { color: var(--dim); font-style: italic; }
+.bar .c.off { text-decoration: line-through; opacity: .5; }
+.bar .var { border-top: 1px dashed var(--line); margin-top: 4px; padding-top: 4px; }
+.empty { color: var(--dim); padding: 40px; text-align: center; }
+.conds { display: flex; flex-wrap: wrap; gap: 6px; }
+.cond { border-radius: 99px; padding: 3px 10px; font-size: 12px; }
+.cond.on { background: var(--accent-weak); border-color: var(--accent); color: var(--accent); }
+.opt { display: flex; align-items: center; gap: 8px; margin: 6px 0; cursor: pointer; }
+.section { padding: 12px; border-bottom: 1px solid var(--line); }
+input[type=range] { width: 100%; accent-color: var(--accent); }
+.shots { display: flex; flex-direction: column; gap: 6px; }
+.shots button { text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.log { font: 11px/1.45 Consolas, monospace; color: var(--dim); max-height: 340px; overflow-y: auto; white-space: pre; }
+.log .sw { color: var(--accent); }
+.log .wr { color: var(--warn); }
+.toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--bad); color: #fff; padding: 8px 14px; border-radius: 6px; display: none; max-width: 70vw; z-index: 9; }
+.kbd { color: var(--dim); font-size: 11px; line-height: 1.7; }
+.kbd kbd { font: 10px Consolas, monospace; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; background: var(--panel2); }
+.spinner { color: var(--dim); }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="left">
+    <div class="pad">
+      <h2>Data folder</h2>
+      <div class="folder" id="folder">not set</div>
+      <div style="display:flex;gap:6px">
+        <button id="browse">Change…</button>
+        <button id="openFile" title="Open a .mus or ice file directly">Open file…</button>
+      </div>
+    </div>
+    <div class="pad" style="padding-top:0">
+      <input type="search" id="search" placeholder="Filter songs  ( / )">
+    </div>
+    <div class="songs" id="songs"></div>
+  </aside>
+
+  <main>
+    <header>
+      <div class="title">
+        <h1 id="title">No song loaded</h1>
+        <span id="chips"></span>
+      </div>
+      <div class="transport">
+        <button class="play primary" id="play" title="Play / pause (Space)" disabled>▶</button>
+        <button id="restart" title="Restart from the selected section (R)" disabled>⟲ Restart</button>
+        <span class="seg" title="When clicking a section">
+          <button id="modeBar" class="on">Switch at next bar</button><button id="modeNow">Switch now</button>
+        </span>
+        <span class="now" id="now"></span>
+      </div>
+    </header>
+    <nav class="tabs" id="tabs"></nav>
+    <div class="content" id="content"><div class="empty">Pick a song on the left. Set the data folder first if the list is greyed out.</div></div>
+  </main>
+
+  <aside class="right">
+    <div class="section">
+      <h2>Conditions</h2>
+      <div class="conds" id="conds"><span class="kbd">—</span></div>
+    </div>
+    <div class="section">
+      <h2>Playback</h2>
+      <label class="opt"><input type="checkbox" id="subclips"> Sub-clips (tails, PSE, pinch)</label>
+      <label class="opt"><input type="checkbox" id="clipVolume" checked> Per-clip volume</label>
+      <label class="opt"><input type="checkbox" id="follow" checked> Detail follows playback</label>
+      <div style="margin-top:8px">Volume <span id="volLabel">80%</span></div>
+      <input type="range" id="volume" min="0" max="100" value="80">
+    </div>
+    <div class="section" id="shotsBox" hidden>
+      <h2>One-shot sounds</h2>
+      <div class="shots" id="shots"></div>
+    </div>
+    <div class="section">
+      <h2>Keys</h2>
+      <div class="kbd">
+        <kbd>←</kbd><kbd>→</kbd> part &nbsp; <kbd>↑</kbd><kbd>↓</kbd> section<br>
+        <kbd>Enter</kbd> switch at next bar &nbsp; <kbd>Shift</kbd>+<kbd>Enter</kbd> now<br>
+        <kbd>Space</kbd> play/pause &nbsp; <kbd>R</kbd> restart &nbsp; <kbd>/</kbd> search<br>
+        <kbd>1</kbd>–<kbd>9</kbd> toggle condition
+      </div>
+    </div>
+    <div class="section" style="border-bottom:0">
+      <h2>Log</h2>
+      <div class="log" id="log"></div>
+    </div>
+  </aside>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const TYPES = { 0: ["Intro", "--t0"], 1: ["Main", "--t1"], 2: ["Outro", "--t2"], 3: ["Special", "--t3"], 4: ["Clear jingle", "--t4"], 8: ["Silence", "--t8"], 9: ["Campship", "--t9"] };
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const short = n => n.replace(/^mu_11_bgm_?/, "");
+const typeOf = t => TYPES[t] || ["Type " + t, "--t8"];
+
+let songs = [], song = null, songName = null, viewPart = 0, selSection = 0, status = null, switchNow = false, enabled = new Set(), lastDetailKey = "";
+
+function send(msg) { window.external.sendMessage(JSON.stringify(msg)); }
+window.addEventListener("error", e => send({ type: "jsError", message: `${e.message} (line ${e.lineno})` }));
+window.external.receiveMessage(text => {
+  const m = JSON.parse(text);
+  try { handle(m); } catch (err) { send({ type: "jsError", message: `${m.type}: ${err.message} ${err.stack ?? ""}` }); }
+});
+function handle(m) {
+  if (m.type === "init") onInit(m);
+  else if (m.type === "loading") { $("title").innerHTML = `<span class="spinner">Loading ${esc(short(m.song))}…</span>`; }
+  else if (m.type === "song") onSong(m);
+  else if (m.type === "status") onStatus(m);
+  else if (m.type === "log") log(m.text, "wr");
+  else if (m.type === "error") toast(m.message);
+}
+
+function toast(text) {
+  const t = $("toast"); t.textContent = text; t.style.display = "block";
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => t.style.display = "none", 5000);
+}
+
+function log(text, cls) {
+  const el = $("log"), line = document.createElement("div");
+  if (cls) line.className = cls;
+  line.textContent = text;
+  el.prepend(line);
+  while (el.childElementCount > 300) el.lastChild.remove();
+}
+
+// ---------------------------------------------------------------- songs
+function onInit(m) {
+  $("folder").textContent = m.dataFolder || "not set — click Change…";
+  songs = m.songs;
+  renderSongs();
+}
+
+function renderSongs() {
+  const q = $("search").value.trim().toLowerCase();
+  $("songs").innerHTML = songs.filter(s => !q || s.name.toLowerCase().includes(q)).map(s =>
+    `<div class="song${s.present ? "" : " absent"}${s.name === songName ? " active" : ""}" data-song="${esc(s.name)}" title="${esc(s.name)}">
+       <span>${esc(short(s.name))}</span>${s.present ? "" : "<small>missing</small>"}</div>`).join("");
+}
+
+$("songs").addEventListener("click", e => {
+  const el = e.target.closest(".song");
+  if (!el || el.classList.contains("absent")) return;
+  send({ type: "open", song: el.dataset.song });
+});
+$("search").addEventListener("input", renderSongs);
+$("browse").onclick = () => send({ type: "browseData" });
+$("openFile").onclick = () => send({ type: "openFile" });
+
+// ---------------------------------------------------------------- song structure
+function partLabel(part) {
+  // Name a part after the prefix most of its clips share (GN_, GB_, G_NtoB_ ...).
+  const counts = {};
+  for (const s of part.sections) for (const ph of s.phrases) for (const bar of ph) for (const g of bar) for (const c of g.clips) {
+    const tokens = c.file.replace(/\.hca$/i, "").split("_");
+    const key = tokens.length > 2 ? tokens.slice(0, 2).join("_") : tokens[0];
+    counts[key] = (counts[key] || 0) + 1;
+  }
+  const best = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+  return best ? best[0] : "silent";
+}
+
+function onSong(m) {
+  song = m; songName = m.title; viewPart = 0; selSection = 0; lastDetailKey = "";
+  song.parts.forEach(p => p.label = partLabel(p));
+  enabled = new Set(m.conditions);
+  const chips = [`<span class="chip">v${esc(m.version)}</span>`];
+  for (const c of m.cpks) chips.push(`<span class="chip" title="${esc(c.file)}">${c.own ? "CPK" : "shared CPK: " + esc(short(c.song))}</span>`);
+  if (!m.cpks.length) chips.push(`<span class="chip warn">no CPK found</span>`);
+  if (m.missingClips) chips.push(`<span class="chip warn">${m.missingClips} clips missing</span>`);
+  if (m.linked) chips.push(`<span class="chip" title="root info">linked: ${esc(m.linked.split(",").map(short).join(", "))}</span>`);
+  $("title").textContent = short(m.title);
+  $("title").title = m.title;
+  $("chips").innerHTML = chips.join(" ");
+  $("play").disabled = $("restart").disabled = false;
+  renderSongs(); renderConditions(); renderShots(); renderTabs(); renderGrid(); renderDetail();
+  log(`loaded ${m.title} (v${m.version}, ${m.parts.length} parts)`);
+}
+
+function renderTabs() {
+  if (!song) return;
+  $("tabs").innerHTML = song.parts.map((p, i) =>
+    `<div class="tab${i === viewPart ? " sel" : ""}" data-part="${i}" title="Part ${i}: ${p.sections.length} sections">
+       Part ${i} <span style="color:var(--dim)">· ${esc(p.label)} · ${p.sections.length}</span><span class="dot" id="dot${i}"></span></div>`).join("");
+  updateLive();
+}
+$("tabs").addEventListener("click", e => {
+  const t = e.target.closest(".tab"); if (!t) return;
+  setPart(+t.dataset.part);
+});
+function setPart(i) {
+  if (!song) return;
+  viewPart = (i + song.parts.length) % song.parts.length;
+  selSection = Math.min(selSection, song.parts[viewPart].sections.length - 1);
+  $("follow").checked = false;
+  renderTabs(); renderGrid(); renderDetail();
+}
+
+function sectionSummary(s) {
+  const firstGroup = s.phrases.flat().flat()[0];
+  const clip = firstGroup?.clips[0]?.file ?? "(silent)";
+  const bars = s.phrases.map(p => p.length).join("+") || "0";
+  return { clip, bars, tempo: firstGroup?.tempo, beats: firstGroup?.beats };
+}
+
+function renderGrid() {
+  if (!song) return;
+  const part = song.parts[viewPart];
+  const used = [...new Set(part.sections.map(s => s.type))];
+  const legend = used.map(t => `<span><i style="background:var(${typeOf(t)[1]})"></i>${typeOf(t)[0]}</span>`).join("");
+  $("content").innerHTML =
+    `<div class="legend">${legend}<span>· click = switch, intro sections continue into the next one</span></div>
+     <div class="grid" id="grid">${part.sections.map((s, i) => {
+       const [label, color] = typeOf(s.type), sum = sectionSummary(s);
+       return `<div class="card" tabindex="0" data-section="${i}" style="--tc:var(${color})" title="${esc(sum.clip)}">
+         <div class="row"><span class="num">S${i}</span><span class="type">${label}</span></div>
+         <div class="meta">${sum.bars} bars · ${sum.tempo ? `T${sum.tempo} B${sum.beats}` : "—"} · u${s.unk2}/${s.unk3}</div>
+         <div class="clip">${esc(sum.clip)}</div>
+         <div class="row"><span></span><span class="flag"></span></div>
+         <div class="prog"></div></div>`;
+     }).join("")}</div>
+     <div class="detail" id="detail"></div>`;
+  updateLive();
+}
+
+$("content").addEventListener("click", e => {
+  const card = e.target.closest(".card"); if (!card) return;
+  selSection = +card.dataset.section;
+  $("follow").checked = false;
+  doSwitch(e.shiftKey || switchNow);
+});
+function doSwitch(now) {
+  if (!song) return;
+  send({ type: "switch", part: viewPart, section: selSection, now });
+  if (!status?.playing) send({ type: "transport", action: "play" });
+  renderDetail(); updateLive();
+}
+
+function renderDetail() {
+  const el = $("detail"); if (!song || !el) return;
+  const s = song.parts[viewPart].sections[selSection]; if (!s) { el.innerHTML = ""; return; }
+  const part = song.parts[viewPart];
+  const [label] = typeOf(s.type);
+  lastDetailKey = viewPart + ":" + selSection;
+  const clipHtml = (c, sub) => {
+    const conds = sub ? part.subClipConditions : part.clipConditions, cname = conds[c.condition] ?? "";
+    const off = !sub && cname && !enabled.has(cname);
+    return `<div class="c${sub ? " sub" : ""}${off ? " off" : ""}" title="${esc(c.file)} · vol ${c.volume} · ${esc(cname)}">${esc(c.file)}</div>`;
+  };
+  el.innerHTML = `<div class="dh"><h3>Part ${viewPart} · S${selSection} · ${label}</h3>
+      <span><button id="qBar">Switch at next bar</button> <button id="qNow">Switch now</button></span></div>` +
+    (s.phrases.length ? s.phrases.map((ph, hi) => `<div class="phrase"><div class="ph">Phrase ${hi + 1} of ${s.phrases.length} · ${ph.length} bars</div>
+      <div class="bars">${ph.map((bar, bi) => `<div class="bar" id="bar_${hi}_${bi}">
+        <div class="bh"><span>Bar ${bi + 1}</span><span>${bar[0] ? `T${bar[0].tempo} B${bar[0].beats}` : "silent"}${bar.length > 1 ? ` · ${bar.length} variations` : ""}</span></div>
+        ${bar.map((g, gi) => `<div class="${gi ? "var" : ""}">${g.clips.map(c => clipHtml(c, false)).join("")}${$("subclips").checked ? g.subClips.map(c => clipHtml(c, true)).join("") : ""}${!g.clips.length ? '<div class="c sub">(no clips)</div>' : ""}</div>`).join("")}
+      </div>`).join("")}</div></div>`).join("") : `<div class="empty">This section has no phrases (silence).</div>`);
+  $("qBar").onclick = () => doSwitch(false);
+  $("qNow").onclick = () => doSwitch(true);
+  updateLive();
+}
+
+// ---------------------------------------------------------------- live status
+function onStatus(m) {
+  status = m;
+  for (const s of m.slots) {
+    const clips = s.clips.length === 0 ? "(silent)" : s.clips[0] + (s.clips.length > 1 ? ` +${s.clips.length - 1}` : "");
+    log(`${fmtTime(s.time)} ${s.switched ? "→" : " "} P${s.part} S${s.section} ${s.phrase + 1}:${s.bar + 1}  ${clips}`, s.switched ? "sw" : "");
+  }
+  for (const w of m.warnings) log(w, "wr");
+  if ($("follow").checked && song && (m.part !== viewPart || m.section !== selSection)) {
+    const partChanged = m.part !== viewPart;
+    viewPart = m.part; selSection = m.section;
+    if (partChanged) { renderTabs(); renderGrid(); }
+    renderDetail();
+  }
+  updateLive();
+}
+
+const fmtTime = t => `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, "0")}`;
+
+function updateLive() {
+  if (!song) return;
+  const m = status;
+  $("play").textContent = m?.playing ? "❚❚" : "▶";
+  if (m) {
+    $("now").innerHTML = `<b>${fmtTime(m.time)}</b>
+      <span>P<b>${m.part}</b> S<b>${m.section}</b> · phrase <b>${m.phrase + 1}</b>/${m.phraseCount} · bar <b>${m.bar + 1}</b>/${m.barCount}</span>
+      <span>${m.tempo ? `${m.tempo} BPM · ${m.beats} beats` : "silent"}</span>
+      <span class="slotbar"><div style="width:${(m.progress * 100).toFixed(1)}%"></div></span>
+      ${m.pending ? `<span class="pending">queued → P${m.pending.part} S${m.pending.section}</span>` : ""}`;
+  }
+  song.parts.forEach((_, i) => {
+    const d = $("dot" + i); if (!d) return;
+    d.className = "dot" + (m?.part === i ? " playing" : m?.pending?.part === i ? " queued" : "");
+  });
+  for (const card of document.querySelectorAll(".card")) {
+    const i = +card.dataset.section;
+    const playing = m && m.part === viewPart && m.section === i;
+    const queued = m?.pending && m.pending.part === viewPart && m.pending.section === i;
+    card.classList.toggle("playing", !!playing);
+    card.classList.toggle("queued", !!queued);
+    card.classList.toggle("sel", i === selSection);
+    card.querySelector(".prog").style.width = playing ? (m.progress * 100).toFixed(1) + "%" : "0";
+    card.querySelector(".flag").textContent = queued ? "QUEUED" : playing ? "PLAYING" : "";
+  }
+  for (const b of document.querySelectorAll(".bar.now")) b.classList.remove("now");
+  if (m && m.part === viewPart && m.section === selSection) $(`bar_${m.phrase}_${m.bar}`)?.classList.add("now");
+}
+
+// ---------------------------------------------------------------- side panel
+function renderConditions() {
+  if (!song) return;
+  $("conds").innerHTML = song.conditions.length ? song.conditions.map((c, i) =>
+    `<button class="cond${enabled.has(c) ? " on" : ""}" data-cond="${esc(c)}" title="key ${i + 1}">${i < 9 ? `<span style="opacity:.6">${i + 1}</span> ` : ""}${esc(c)}</button>`).join("")
+    : `<span class="kbd">none</span>`;
+}
+$("conds").addEventListener("click", e => { const b = e.target.closest(".cond"); if (b) toggleCondition(b.dataset.cond); });
+function toggleCondition(name) {
+  const on = !enabled.has(name);
+  if (on) enabled.add(name); else enabled.delete(name);
+  send({ type: "condition", name, on });
+  renderConditions(); renderDetail();
+}
+
+function renderShots() {
+  const shots = song?.oneShots ?? [];
+  $("shotsBox").hidden = !shots.length;
+  $("shots").innerHTML = shots.map((s, i) => `<button data-shot="${i}" title="kind ${s.kind}${s.condition ? ", " + esc(s.condition) : ""}">▶ ${esc(s.file)}</button>`).join("");
+}
+$("shots").addEventListener("click", e => { const b = e.target.closest("[data-shot]"); if (b) send({ type: "oneShot", index: +b.dataset.shot }); });
+
+$("subclips").onchange = e => { send({ type: "subclips", on: e.target.checked }); renderDetail(); };
+$("clipVolume").onchange = e => send({ type: "clipVolume", on: e.target.checked });
+$("follow").onchange = () => { if ($("follow").checked && status) onStatus({ ...status, slots: [], warnings: [] }); };
+$("volume").oninput = e => { $("volLabel").textContent = e.target.value + "%"; send({ type: "volume", value: e.target.value / 100 }); };
+$("play").onclick = () => send({ type: "transport", action: "toggle" });
+$("restart").onclick = () => send({ type: "transport", action: "restart", part: viewPart, section: selSection });
+function setMode(now) { switchNow = now; $("modeNow").classList.toggle("on", now); $("modeBar").classList.toggle("on", !now); }
+$("modeBar").onclick = () => setMode(false);
+$("modeNow").onclick = () => setMode(true);
+
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT" && e.target.type !== "checkbox" && e.target.type !== "range") {
+    if (e.key === "Escape") e.target.blur();
+    return;
+  }
+  if (e.key === "/") { e.preventDefault(); $("search").focus(); return; }
+  if (!song) return;
+  const count = song.parts[viewPart].sections.length;
+  switch (e.key) {
+    case "ArrowLeft": setPart(viewPart - 1); break;
+    case "ArrowRight": setPart(viewPart + 1); break;
+    case "ArrowUp": selSection = (selSection + count - 1) % count; $("follow").checked = false; renderDetail(); break;
+    case "ArrowDown": selSection = (selSection + 1) % count; $("follow").checked = false; renderDetail(); break;
+    case "Enter": doSwitch(e.shiftKey || switchNow); break;
+    case " ": send({ type: "transport", action: "toggle" }); break;
+    case "r": case "R": $("restart").click(); break;
+    default:
+      if (/^[1-9]$/.test(e.key) && song.conditions[+e.key - 1]) toggleCondition(song.conditions[+e.key - 1]);
+      else return;
+  }
+  e.preventDefault();
+});
+
+send({ type: "ready" });
+</script>
+</body>
+</html>

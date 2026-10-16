@@ -103,6 +103,11 @@ public sealed class ClipLibrary : IDisposable
     }
 }
 
+/// <summary>Where the engine is, for display.</summary>
+public sealed record PlaybackPosition(int Part, int Section, int Phrase, int PhraseCount, int Bar, int BarCount,
+                                      int Tempo, int Beats, double SlotProgress, (int part, int section)? Pending,
+                                      double Seconds);
+
 /// <summary>Information about a slot that just started, for display.</summary>
 public sealed record SlotInfo(int Part, int Section, int Phrase, int PhraseCount, int Bar, int BarCount,
                               MusClipGroup? Group, double Seconds, IReadOnlyList<string> Clips, bool Switched);
@@ -124,7 +129,8 @@ public sealed class MusEngine
 
     int part, section, phrase, bar = -1;
     long now;
-    double nextSlotAt;
+    double nextSlotAt, slotStartedAt;
+    MusClipGroup? currentGroup;
     (int part, int section)? pending;
 
     sealed class Voice(short[][] samples, float gain)
@@ -163,12 +169,44 @@ public sealed class MusEngine
 
     public (int part, int section)? Pending { get { lock (gate) return pending; } }
 
-    /// <summary>Queue a change; it takes effect at the next slot boundary.</summary>
-    public void RequestSwitch(int targetPart, int targetSection)
+    /// <summary>
+    /// Queue a change; it takes effect at the next slot boundary. With <paramref name="immediate"/> the
+    /// current clips are cut and the target starts right away.
+    /// </summary>
+    public void RequestSwitch(int targetPart, int targetSection, bool immediate = false)
     {
         CheckTarget(targetPart, targetSection);
-        lock (gate) pending = (targetPart, targetSection);
         PrefetchSlot(targetPart, targetSection, 0, 0);
+        lock (gate)
+        {
+            pending = (targetPart, targetSection);
+            if (immediate)
+            {
+                voices.Clear();
+                nextSlotAt = now;
+            }
+        }
+    }
+
+    /// <summary>Stops every voice and starts over at the given section on the next render.</summary>
+    public void Restart(int targetPart, int targetSection) => RequestSwitch(targetPart, targetSection, immediate: true);
+
+    /// <summary>Snapshot for display: where playback is and how far into the current slot (0-1).</summary>
+    public PlaybackPosition Position
+    {
+        get
+        {
+            lock (gate)
+            {
+                var sec = mus.Parts[part].Sections[section];
+                int bars = phrase < sec.Phrases.Count ? sec.Phrases[phrase].Bars.Count : 0;
+                double length = nextSlotAt - slotStartedAt;
+                double progress = length > 0 ? Math.Clamp((now - slotStartedAt) / length, 0, 1) : 0;
+                return new PlaybackPosition(part, section, phrase, sec.Phrases.Count, Math.Max(0, bar), bars,
+                                            currentGroup?.Tempo ?? 0, currentGroup?.Beats ?? 0, progress, pending,
+                                            (double)now / SampleRate);
+            }
+        }
     }
 
     void CheckTarget(int p, int s)
@@ -233,7 +271,10 @@ public sealed class MusEngine
         var group = bar0 is { Variations.Count: > 0 } ? bar0.Variations[random.Next(bar0.Variations.Count)] : null;
 
         double seconds = group is { Tempo: > 0 } ? group.Beats * 60.0 / group.Tempo : 1.0;
+        slotStartedAt = now;
+        if (nextSlotAt < now - 1) nextSlotAt = now; // only after an immediate switch; keeps fractional timing otherwise
         nextSlotAt += seconds * SampleRate;
+        currentGroup = group;
 
         var started = new List<string>();
         if (group != null)

@@ -9,8 +9,8 @@ var json = new JsonSerializerOptions
 
 if (args.Length == 0) return Usage();
 
-// --ice works with every command that takes a .mus: the argument is then an ice file, a hashed name in the
-// data folder, or a song name such as mu_11_bgm_dragonland (resolved against the folder set with "datadir").
+// --ice works with every command that takes a .mus: the argument is then a song name such as
+// mu_11_bgm_dragonland, an ice's (md5) name in the data folder set with "datadir", or a full path to an ice.
 bool ice = args.Contains("--ice", StringComparer.OrdinalIgnoreCase);
 if (ice && args[0].ToLowerInvariant() != "play")
     args = args.Where(a => !a.Equals("--ice", StringComparison.OrdinalIgnoreCase)).ToArray();
@@ -147,6 +147,9 @@ try
         case "scan" when args.Length is 1 or 2:
             return Scan(args.Length == 2 ? args[1] : null, json);
 
+        case "ui" when args.Length is 1 or 2:
+            return UiHost.Run(args.Length == 2 ? args[1] : null);
+
         case "dump" when args.Length is 2 or 4:
         {
             // dump <song> [relOffset len]: hex view of the REL0 data (printed only), for format research.
@@ -215,13 +218,15 @@ static int Usage()
           rename   <in.mus> <out.mus> <find> <repl>   substring-replace clip file names
           template <out.json>                         write a minimal JSON to start a new file
           verify   <file.mus>                         check read/write round-trips byte-for-byte
+          ui       [song]                             graphical player: browse songs, switch parts/sections
           datadir  [pso2_bin\data\win32]              show or set the game data folder used by --ice
           songs                                       list known base-game songs and their ice hashes
           scan     [song]                             read every known song from the data folder (in memory),
                                                       report its version and whether it parses/round-trips
 
-          --ice    any <file.mus> above may instead be an ice file, a hashed name or a song name
-                   (mu_11_bgm_dragonland or just dragonland) looked up in the data folder
+          --ice    any <file.mus> above is read from an ice instead: give a song name
+                   (mu_11_bgm_dragonland or just dragonland), the ice's name in the data folder
+                   (e69f245db646d2a2930995705adcc87d) or a full path to the ice
           --data <folder>   use this data folder for this run instead of the saved one
         """);
     Console.Error.WriteLine(PlayCommand.Usage);
