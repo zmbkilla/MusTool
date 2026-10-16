@@ -2,7 +2,7 @@
   "profiles": {
     "MusTool": {
       "commandName": "Project",
-      "commandLineArgs": "play 1b2e3a2a8eefe583d2149aebb440a064 "
+      "commandLineArgs": "play C:\\Users\\zmbkilla\\Desktop\\dltest\\PHANTASYSTARONLINE2_JP_5thFeb2021\\PHANTASYSTARONLINE2\\pso2_bin\\data\\win32\\e69f245db646d2a2930995705adcc87d --ice"
     }
   }
 }

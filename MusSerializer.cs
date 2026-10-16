@@ -31,6 +31,9 @@ public static class MusSerializer
 {
     public const byte Version0A = 0x0A;
     public const byte Version12 = 0x12;
+    public const byte Version07 = 0x07;
+    public const byte Version09 = 0x09;
+    public const byte Version0C = 0x0C;
 
     const uint SentinelOffset = 0x10;
 
@@ -38,8 +41,15 @@ public static class MusSerializer
     {
         public static Layout For(byte version) => version switch
         {
+            Version07 => new Layout(8, 8, 0x10, 0x10, false),
+            Version0C => new Layout(8, 8, 0x10, 0x10, false),
+            //UNK
+            Version09 => new Layout(8, 8, 0x10, 0x10, true),
             Version0A => new Layout(8, 8, 0x10, 0x10, false),
+            //NGS
             Version12 => new Layout(0x2C, 0x14, 0x20, 0xB4, true),
+
+
             _ => throw new NotSupportedException(
                 $"Unsupported .mus version 0x{version:X2} (known: 0x0A, 0x12). A sample of this file is needed to add it."),
         };
@@ -51,7 +61,7 @@ public static class MusSerializer
     public static MusFile ReadIce(byte[] file) => Read(file);
 
     public static MusFile Read(byte[] data)
-    {
+     {
         if (data.Length < 0x20 || Encoding.ASCII.GetString(data, 0, 4) != "NIFL")
             throw new InvalidDataException("Not a NIFL file.");
 

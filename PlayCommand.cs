@@ -1,22 +1,20 @@
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
 using System.Globalization;
-using Zamboni;
 
 namespace MusTool;
 
 public static class PlayCommand
 {
-    private static IceFile MUSICE;
     public const string Usage =
-        "  play     <file.mus> <cpk|folder>... [options]  play the song; switch sections live\n" +
+        "  play     <file.mus> [cpk|folder]... [options]  play the song; switch sections live\n" +
         "             --part N --section N     where to start (default 0 0)\n" +
         "             --subclips               also play sub-clips (R_ tails, PSE_, pinch_)\n" +
         "             --no-volume              ignore per-clip volume\n" +
         "             --key HEX                HCA key (default PSO2 CC55463930DBE1AB)\n" +
         "             --out f.wav --seconds S  render to a WAV instead of playing\n" +
-        "             --switch T:S | T:P.S     (with --out) request a switch at T seconds"+
-        "             --ice                    Input file is ice";
+        "             --switch T:S | T:P.S     (with --out) request a switch at T seconds\n" +
+        "             --ice                    <file.mus> is an ice / song name; its CPK is found automatically";
 
     public static int Run(string[] args)
     {
@@ -30,8 +28,6 @@ public static class PlayCommand
         ulong key = ClipLibrary.Pso2HcaKey;
         var switches = new List<(double at, int part, int section)>();
         bool ice = false;
-        List<byte> data = new List<byte>();
-        MemoryStream strm;
 
         for (int i = 1; i < args.Length; i++)
         {
@@ -55,37 +51,17 @@ public static class PlayCommand
                                   int.Parse(ps[^1])));
                     break;
                 }
-                case "--ice":
-                    {
-                        ice = true;
-                        strm = new MemoryStream(File.ReadAllBytes(musPath));
-                        MUSICE = IceFile.LoadIceFile(strm);
-                        List<byte[]> files = new List<byte[]>(MUSICE.groupOneFiles);
-                        files.AddRange(MUSICE.groupTwoFiles);
-
-                        foreach (byte[]file in files)
-                        {
-                            string fileName = IceFile.getFileName(file);
-                            if (fileName.EndsWith(".mus"))
-                            {
-                                data = file.ToList();
-                            }
-                        }
-                        break;
-                    }
+                case "--ice": ice = true; break;
                 default:
                     if (a.StartsWith("--")) throw new ArgumentException($"unknown option {a}");
                     sources.Add(a);
                     break;
             }
         }
+        var (mus, song) = GameData.Open(musPath, ice);
+        // The song's own CPK (found next to the ice by its hashed name) goes first; extra sources are fallbacks.
+        if (song?.CpkPath is { } cpk) sources.Insert(0, cpk);
         if (sources.Count == 0) throw new ArgumentException("play needs at least one CPK or folder with the .hca clips");
-
-        var mus = MusSerializer.Read(musPath);
-        if (ice)
-        {
-            mus = MusSerializer.ReadIce(data.ToArray());
-        }
         using var library = new ClipLibrary(sources, key);
         var engine = new MusEngine(mus, library, part, section) { PlaySubClips = subClips, ApplyClipVolume = !noVolume };
 
