@@ -25,6 +25,7 @@ body { background: var(--bg); color: var(--text); font: 13px/1.4 "Segoe UI", sys
 button { font: inherit; color: inherit; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
 button:hover { border-color: var(--accent); }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+select { font: inherit; color: inherit; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 4px; outline: none; }
 input[type=search], input[type=text] { font: inherit; color: inherit; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; width: 100%; outline: none; }
 input:focus { border-color: var(--accent); }
 .app { display: grid; grid-template-columns: 250px 1fr 290px; height: 100vh; }
@@ -124,7 +125,16 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
       </div>
     </div>
     <div class="pad" style="padding-top:0">
-      <input type="search" id="search" placeholder="Filter songs  ( / )">
+      <div style="display:flex;gap:6px">
+        <input type="search" id="search" placeholder="Filter songs  ( / )">
+        <select id="kindFilter" title="Classic (win32) or NGS (win32reboot) songs">
+          <option value="classic">Classic</option>
+          <option value="ngs">NGS</option>
+        </select>
+        <select id="verFilter" title="Show only songs of this .mus version">
+          <option value="">All versions</option>
+        </select>
+      </div>
     </div>
     <div class="songs" id="songs"></div>
   </aside>
@@ -149,13 +159,27 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
   </main>
 
   <aside class="right">
+    <div class="section" id="battleBox" hidden>
+      <h2>Battle state</h2>
+      <div class="kbd" style="margin-bottom:6px" id="battleNote"></div>
+      <div class="conds" id="battle"></div>
+    </div>
+    <div class="section" id="variantBox" hidden>
+      <h2>Variant</h2>
+      <div class="kbd" style="margin-bottom:6px">First–Sixth: the game turns on exactly one, set by the stage.</div>
+      <div class="conds" id="variants"></div>
+    </div>
     <div class="section">
       <h2>Conditions</h2>
       <div class="conds" id="conds"><span class="kbd">—</span></div>
     </div>
+    <div class="section" id="randomBox" hidden>
+      <h2>Random picks</h2>
+      <div class="kbd" style="margin-bottom:6px">Entries sharing a Random* condition are alternatives: one plays, picked again at each section start. Pin one or leave on Auto.</div>
+      <div id="randoms"></div>
+    </div>
     <div class="section">
       <h2>Playback</h2>
-      <label class="opt"><input type="checkbox" id="subclips"> Sub-clips (tails, PSE, pinch)</label>
       <label class="opt"><input type="checkbox" id="clipVolume" checked> Per-clip volume</label>
       <label class="opt"><input type="checkbox" id="follow" checked> Detail follows playback</label>
       <div style="margin-top:8px">Volume <span id="volLabel">80%</span></div>
@@ -163,6 +187,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
     </div>
     <div class="section" id="shotsBox" hidden>
       <h2>One-shot sounds</h2>
+      <div class="kbd" style="margin-bottom:6px" id="shotsNote" hidden>The game ignores these in this version (only v0x0B and later use them). Playable here for preview.</div>
       <div class="shots" id="shots"></div>
     </div>
     <div class="section">
@@ -171,7 +196,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
         <kbd>←</kbd><kbd>→</kbd> part &nbsp; <kbd>↑</kbd><kbd>↓</kbd> section<br>
         <kbd>Enter</kbd> switch at next bar &nbsp; <kbd>Shift</kbd>+<kbd>Enter</kbd> now<br>
         <kbd>Space</kbd> play/pause &nbsp; <kbd>R</kbd> restart &nbsp; <kbd>/</kbd> search<br>
-        <kbd>1</kbd>–<kbd>9</kbd> toggle condition
+        <kbd>1</kbd>–<kbd>9</kbd> toggle condition &nbsp; <kbd>B</kbd> battle state &nbsp; <kbd>V</kbd> variant
       </div>
     </div>
     <div class="section" style="border-bottom:0">
@@ -186,10 +211,11 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 const TYPES = { 0: ["Intro", "--t0"], 1: ["Main", "--t1"], 2: ["Outro", "--t2"], 3: ["Special", "--t3"], 4: ["Clear jingle", "--t4"], 8: ["Silence", "--t8"], 9: ["Campship", "--t9"] };
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const short = n => n.replace(/^mu_11_bgm_?/, "");
+const short = n => n.replace(/^mu_11_bgm(02)?_?/, "");
 const typeOf = t => TYPES[t] || ["Type " + t, "--t8"];
 
 let songs = [], song = null, songName = null, viewPart = 0, selSection = 0, status = null, switchNow = false, enabled = new Set(), lastDetailKey = "";
+let picks = [], picksKey = "";
 
 function send(msg) { window.external.sendMessage(JSON.stringify(msg)); }
 window.addEventListener("error", e => send({ type: "jsError", message: `${e.message} (line ${e.lineno})` }));
@@ -201,6 +227,7 @@ function handle(m) {
   if (m.type === "init") onInit(m);
   else if (m.type === "loading") { $("title").innerHTML = `<span class="spinner">Loading ${esc(short(m.song))}…</span>`; }
   else if (m.type === "song") onSong(m);
+  else if (m.type === "versions") onVersions(m);
   else if (m.type === "status") onStatus(m);
   else if (m.type === "log") log(m.text, "wr");
   else if (m.type === "error") toast(m.message);
@@ -223,14 +250,36 @@ function log(text, cls) {
 function onInit(m) {
   $("folder").textContent = m.dataFolder || "not set — click Change…";
   songs = m.songs;
+  versions = {};
+  renderVersionFilter();
   renderSongs();
 }
 
+// Versions arrive in batches from a background read of every present song.
+let versions = {};
+function onVersions(m) {
+  Object.assign(versions, m.versions);
+  renderVersionFilter();
+  renderSongs();
+}
+function renderVersionFilter() {
+  const sel = $("verFilter"), keep = sel.value;
+  const counts = {}, kind = $("kindFilter").value, ofKind = songs.filter(s => s.kind === kind);
+  for (const s of ofKind) if (versions[s.name]) counts[versions[s.name]] = (counts[versions[s.name]] || 0) + 1;
+  const pending = ofKind.filter(s => s.present && !versions[s.name]).length;
+  sel.innerHTML = `<option value="">All versions${pending ? ` (reading ${pending}…)` : ""}</option>` +
+    Object.keys(counts).sort().map(v => `<option value="${esc(v)}">${v === "error" ? "Unreadable" : "v" + esc(v)} (${counts[v]})</option>`).join("");
+  sel.value = counts[keep] ? keep : "";
+}
+$("verFilter").addEventListener("change", renderSongs);
+$("kindFilter").addEventListener("change", () => { renderVersionFilter(); renderSongs(); });
+
 function renderSongs() {
   const q = $("search").value.trim().toLowerCase();
-  $("songs").innerHTML = songs.filter(s => !q || s.name.toLowerCase().includes(q)).map(s =>
-    `<div class="song${s.present ? "" : " absent"}${s.name === songName ? " active" : ""}" data-song="${esc(s.name)}" title="${esc(s.name)}">
-       <span>${esc(short(s.name))}</span>${s.present ? "" : "<small>missing</small>"}</div>`).join("");
+  const ver = $("verFilter").value, kind = $("kindFilter").value;
+  $("songs").innerHTML = songs.filter(s => s.kind === kind && (!q || s.name.toLowerCase().includes(q)) && (!ver || versions[s.name] === ver)).map(s =>
+    `<div class="song${s.present ? "" : " absent"}${s.name === songName ? " active" : ""}" data-song="${esc(s.name)}" title="${esc(s.name)}${versions[s.name] ? " · v" + esc(versions[s.name]) : ""}">
+       <span>${esc(short(s.name))}</span>${s.present ? (versions[s.name] ? `<small>${esc(versions[s.name].replace("0x", "v"))}</small>` : "") : "<small>missing</small>"}</div>`).join("");
 }
 
 $("songs").addEventListener("click", e => {
@@ -258,7 +307,7 @@ function partLabel(part) {
 function onSong(m) {
   song = m; songName = m.title; viewPart = 0; selSection = 0; lastDetailKey = "";
   song.parts.forEach(p => p.label = partLabel(p));
-  enabled = new Set(m.conditions);
+  enabled = new Set(m.enabledConditions);
   const chips = [`<span class="chip">v${esc(m.version)}</span>`];
   for (const c of m.cpks) chips.push(`<span class="chip" title="${esc(c.file)}">${c.own ? "CPK" : "shared CPK: " + esc(short(c.song))}</span>`);
   if (!m.cpks.length) chips.push(`<span class="chip warn">no CPK found</span>`);
@@ -268,7 +317,8 @@ function onSong(m) {
   $("title").title = m.title;
   $("chips").innerHTML = chips.join(" ");
   $("play").disabled = $("restart").disabled = false;
-  renderSongs(); renderConditions(); renderShots(); renderTabs(); renderGrid(); renderDetail();
+  picks = []; picksKey = ""; met = null; battle = 0; variant = 0;
+  renderSongs(); renderBattle(); renderVariants(); renderConditions(); renderShots(); renderRandoms(); renderTabs(); renderGrid(); renderDetail();
   log(`loaded ${m.title} (v${m.version}, ${m.parts.length} parts)`);
 }
 
@@ -288,7 +338,7 @@ function setPart(i) {
   viewPart = (i + song.parts.length) % song.parts.length;
   selSection = Math.min(selSection, song.parts[viewPart].sections.length - 1);
   $("follow").checked = false;
-  renderTabs(); renderGrid(); renderDetail();
+  renderTabs(); renderGrid(); renderRandoms(); renderDetail();
 }
 
 function sectionSummary(s) {
@@ -337,9 +387,13 @@ function renderDetail() {
   const part = song.parts[viewPart];
   const [label] = typeOf(s.type);
   lastDetailKey = viewPart + ":" + selSection;
+  // Struck through: condition off, or an alternative of a Random* group that is not the current pick.
   const clipHtml = (c, sub) => {
     const conds = sub ? part.subClipConditions : part.clipConditions, cname = conds[c.condition] ?? "";
-    const off = !sub && cname && !enabled.has(cname);
+    const pick = picks.find(p => p.part === viewPart && p.sub === sub && p.name === cname);
+    const known = met?.[viewPart]?.[sub ? "sub" : "main"];
+    const off = known ? !known[c.condition]
+      : (cname && !BATTLE.includes(cname) && !VARIANTS.includes(cname) && !enabled.has(cname)) || (pick && pick.current !== c.condition);
     return `<div class="c${sub ? " sub" : ""}${off ? " off" : ""}" title="${esc(c.file)} · vol ${c.volume} · ${esc(cname)}">${esc(c.file)}</div>`;
   };
   el.innerHTML = `<div class="dh"><h3>Part ${viewPart} · S${selSection} · ${label}</h3>
@@ -347,7 +401,7 @@ function renderDetail() {
     (s.phrases.length ? s.phrases.map((ph, hi) => `<div class="phrase"><div class="ph">Phrase ${hi + 1} of ${s.phrases.length} · ${ph.length} bars</div>
       <div class="bars">${ph.map((bar, bi) => `<div class="bar" id="bar_${hi}_${bi}">
         <div class="bh"><span>Bar ${bi + 1}</span><span>${bar[0] ? `T${bar[0].tempo} B${bar[0].beats}` : "silent"}${bar.length > 1 ? ` · ${bar.length} variations` : ""}</span></div>
-        ${bar.map((g, gi) => `<div class="${gi ? "var" : ""}">${g.clips.map(c => clipHtml(c, false)).join("")}${$("subclips").checked ? g.subClips.map(c => clipHtml(c, true)).join("") : ""}${!g.clips.length ? '<div class="c sub">(no clips)</div>' : ""}</div>`).join("")}
+        ${bar.map((g, gi) => `<div class="${gi ? "var" : ""}">${g.clips.map(c => clipHtml(c, false)).join("")}${g.subClips.map(c => clipHtml(c, true)).join("")}${!g.clips.length ? '<div class="c sub">(no clips)</div>' : ""}</div>`).join("")}
       </div>`).join("")}</div></div>`).join("") : `<div class="empty">This section has no phrases (silence).</div>`);
   $("qBar").onclick = () => doSwitch(false);
   $("qNow").onclick = () => doSwitch(true);
@@ -357,6 +411,10 @@ function renderDetail() {
 // ---------------------------------------------------------------- live status
 function onStatus(m) {
   status = m;
+  const key = JSON.stringify([m.picks, m.met]);
+  if (key !== picksKey) { picksKey = key; picks = m.picks; met = m.met; renderRandoms(); renderDetail(); }
+  if (m.battle !== battle) { battle = m.battle; renderBattle(); }
+  if (m.variant !== variant) { variant = m.variant; renderVariants(); }
   for (const s of m.slots) {
     const clips = s.clips.length === 0 ? "(silent)" : s.clips[0] + (s.clips.length > 1 ? ` +${s.clips.length - 1}` : "");
     log(`${fmtTime(s.time)} ${s.switched ? "→" : " "} P${s.part} S${s.section} ${s.phrase + 1}:${s.bar + 1}  ${clips}`, s.switched ? "sw" : "");
@@ -365,7 +423,7 @@ function onStatus(m) {
   if ($("follow").checked && song && (m.part !== viewPart || m.section !== selSection)) {
     const partChanged = m.part !== viewPart;
     viewPart = m.part; selSection = m.section;
-    if (partChanged) { renderTabs(); renderGrid(); }
+    if (partChanged) { renderTabs(); renderGrid(); renderRandoms(); }
     renderDetail();
   }
   updateLive();
@@ -403,10 +461,47 @@ function updateLive() {
 }
 
 // ---------------------------------------------------------------- side panel
+// Normal/Hero/Pinch/Pse follow the game's battle state (0-5) instead of being toggled.
+const BATTLE = ["Normal", "Hero", "Pinch", "Pse"];
+const STATES = ["Normal", "Hero", "Pinch", "Pse", "Hero+Pse", "Pinch+Pse"];
+let battle = 0, met = null;
+function renderBattle() {
+  const b = song?.battle;
+  $("battleBox").hidden = !b;
+  if (!b) return;
+  $("battleNote").innerHTML = `Drives Normal/Hero/Pinch/Pse like the game. Hero, Pinch and Pse change ${b.allParts ? "every part" : "part 1 only"}; Pinch silences its main clips. Flags ${esc(b.flags)}.`;
+  $("battle").innerHTML = STATES.map((name, i) => {
+    const as = b.becomes[i], same = as === i;
+    return `<button class="cond${battle === i ? " on" : ""}" data-state="${i}" style="${same ? "" : "opacity:.5"}"
+      title="${same ? name : `this song's flags turn it into ${STATES[as]}`}">${name}</button>`;
+  }).join("");
+}
+const VARIANTS = ["First", "Second", "Third", "Fourth", "Fifth", "Sixth"];
+let variant = 0;
+function renderVariants() {
+  $("variantBox").hidden = !song?.usesVariant;
+  if (!song?.usesVariant) return;
+  $("variants").innerHTML = VARIANTS.map((name, i) => `<button class="cond${variant === i ? " on" : ""}" data-variant="${i}">${name}</button>`).join("");
+}
+$("variants").addEventListener("click", e => { const b = e.target.closest("[data-variant]"); if (b) setVariant(+b.dataset.variant); });
+function setVariant(i) {
+  variant = i;
+  send({ type: "variant", index: i });
+  renderVariants();
+}
+$("battle").addEventListener("click", e => { const b = e.target.closest("[data-state]"); if (b) setBattle(+b.dataset.state); });
+function setBattle(state) {
+  battle = state;
+  send({ type: "battle", state });
+  renderBattle();
+}
+
 function renderConditions() {
   if (!song) return;
+  // Conditions used only by sub-clips get a "sub" tag.
+  const subOnly = c => !song.parts.some(p => p.clipConditions.includes(c));
   $("conds").innerHTML = song.conditions.length ? song.conditions.map((c, i) =>
-    `<button class="cond${enabled.has(c) ? " on" : ""}" data-cond="${esc(c)}" title="key ${i + 1}">${i < 9 ? `<span style="opacity:.6">${i + 1}</span> ` : ""}${esc(c)}</button>`).join("")
+    `<button class="cond${enabled.has(c) ? " on" : ""}" data-cond="${esc(c)}" title="key ${i + 1}${subOnly(c) ? " · sub-clips" : ""}">${i < 9 ? `<span style="opacity:.6">${i + 1}</span> ` : ""}${esc(c)}${subOnly(c) ? ` <span style="opacity:.6;font-size:10px">sub</span>` : ""}</button>`).join("")
     : `<span class="kbd">none</span>`;
 }
 $("conds").addEventListener("click", e => { const b = e.target.closest(".cond"); if (b) toggleCondition(b.dataset.cond); });
@@ -417,14 +512,34 @@ function toggleCondition(name) {
   renderConditions(); renderDetail();
 }
 
+function renderRandoms() {
+  const groups = (song?.randomGroups ?? []).filter(g => g.part === viewPart);
+  $("randomBox").hidden = !groups.length;
+  $("randoms").innerHTML = groups.map(g => {
+    const p = picks.find(x => x.part === g.part && x.sub === g.sub && x.name === g.name);
+    const btn = (entry, text, title) => {
+      const on = entry < 0 ? p?.pinned == null : p?.pinned === entry;
+      const playing = entry >= 0 && p?.current === entry;
+      return `<button class="cond${on ? " on" : ""}" style="${playing ? "font-weight:600" : ""}" title="${esc(title)}"
+        data-rpart="${g.part}" data-rsub="${g.sub}" data-rname="${esc(g.name)}" data-rentry="${entry}">${playing ? "▶ " : ""}${esc(text)}</button>`;
+    };
+    return `<div style="margin-bottom:8px"><div style="color:var(--dim);font-size:11px;margin-bottom:4px">${esc(g.name)} · ${g.sub ? "sub-clips" : "clips"}</div>
+      <div class="conds">${btn(-1, "Auto", "pick at random at each section start")}${g.entries.map(e => btn(e.index, e.label.replace(/_T\d+_B\d+$/, ""), e.label)).join("")}</div></div>`;
+  }).join("");
+}
+$("randoms").addEventListener("click", e => {
+  const b = e.target.closest("[data-rentry]"); if (!b) return;
+  send({ type: "randomPick", part: +b.dataset.rpart, sub: b.dataset.rsub === "true", name: b.dataset.rname, entry: +b.dataset.rentry });
+});
+
 function renderShots() {
   const shots = song?.oneShots ?? [];
   $("shotsBox").hidden = !shots.length;
+  $("shotsNote").hidden = song?.oneShotsUsed !== false;
   $("shots").innerHTML = shots.map((s, i) => `<button data-shot="${i}" title="kind ${s.kind}${s.condition ? ", " + esc(s.condition) : ""}">▶ ${esc(s.file)}</button>`).join("");
 }
 $("shots").addEventListener("click", e => { const b = e.target.closest("[data-shot]"); if (b) send({ type: "oneShot", index: +b.dataset.shot }); });
 
-$("subclips").onchange = e => { send({ type: "subclips", on: e.target.checked }); renderDetail(); };
 $("clipVolume").onchange = e => send({ type: "clipVolume", on: e.target.checked });
 $("follow").onchange = () => { if ($("follow").checked && status) onStatus({ ...status, slots: [], warnings: [] }); };
 $("volume").oninput = e => { $("volLabel").textContent = e.target.value + "%"; send({ type: "volume", value: e.target.value / 100 }); };
@@ -450,6 +565,8 @@ document.addEventListener("keydown", e => {
     case "Enter": doSwitch(e.shiftKey || switchNow); break;
     case " ": send({ type: "transport", action: "toggle" }); break;
     case "r": case "R": $("restart").click(); break;
+    case "v": case "V": if (song?.usesVariant) setVariant((variant + 1) % VARIANTS.length); else return; break;
+    case "b": case "B": if (song?.battle) setBattle((battle + 1) % STATES.length); else return; break;
     default:
       if (/^[1-9]$/.test(e.key) && song.conditions[+e.key - 1]) toggleCondition(song.conditions[+e.key - 1]);
       else return;

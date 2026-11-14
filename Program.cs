@@ -7,7 +7,9 @@ var json = new JsonSerializerOptions
     DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
 };
 
-if (args.Length == 0) return Usage();
+// No arguments (e.g. double-clicked): open the UI. "help" prints the commands.
+if (args.Length == 0) args = ["ui"];
+if (args[0] is "help" or "-h" or "--help" or "/?") return Usage();
 
 // --ice works with every command that takes a .mus: the argument is then a song name such as
 // mu_11_bgm_dragonland, an ice's (md5) name in the data folder set with "datadir", or a full path to an ice.
@@ -32,6 +34,32 @@ try
         case "info" when args.Length == 2:
             PrintInfo(Open(args[1]));
             return 0;
+
+        case "info" when args.Length == 4 && args[2] == "--section":
+        {
+            // info <song> --section P.S: every bar of one section with its clips
+            var mus = Open(args[1]);
+            var ps = args[3].Split('.');
+            var part = mus.Parts[int.Parse(ps[0])];
+            var sec = part.Sections[int.Parse(ps[1])];
+            // Shown as the game plays it (MusPlayback): list volumes, each clip's volume and condition, "skip" for
+            // records the game ignores, "#n" for a condition index past the list (the game skips those too).
+            Console.WriteLine($"P{ps[0]} S{ps[1]} type={sec.Type} unk2=0x{sec.Unk2:X2} unk3={sec.Unk3}" +
+                              (sec.Extra != null ? $" name=\"{sec.Name}\" x={Convert.ToHexString(sec.Extra)}" : ""));
+            for (int h = 0; h < sec.Phrases.Count; h++)
+                for (int b = 0; b < sec.Phrases[h].Bars.Count; b++)
+                    foreach (var (g, v) in sec.Phrases[h].Bars[b].Variations.Select((g, v) => (g, v)))
+                    {
+                        var play = MusPlayback.Group(mus.Version, g);
+                        string Clip(MusPlayback.PlayClip c, List<MusCondition> conds) =>
+                            $"{(c.File.Length > 0 ? c.File : "\"\"")}[v{c.Volume} {(c.Condition < conds.Count ? conds[c.Condition].Name : "#" + c.Condition)}{(c.Plays ? "" : " skip")}]";
+                        Console.WriteLine($"  {h + 1}:{b + 1,-3}{(v > 0 ? $" var{v}" : "")} T{play.Tempo} B{play.Beats} vol {play.MainVolume}/{play.SubVolume}  " +
+                                          (g.Extra != null ? $"x={Convert.ToHexString(g.Extra)}  " : "") +
+                                          string.Join("  ", play.Clips.Select(c => Clip(c, part.ClipConditions))) +
+                                          (play.SubClips.Count > 0 ? "  | sub: " + string.Join("  ", play.SubClips.Select(c => Clip(c, part.SubClipConditions))) : ""));
+                    }
+            return 0;
+        }
 
         case "clips" when args.Length == 2:
             foreach (var name in AllClips(Open(args[1])).Select(c => c.File).Distinct().Order())
@@ -119,6 +147,31 @@ try
             return diff < 0 ? 0 : 1;
         }
 
+        case "timing" when args.Length == 3:
+        {
+            // timing <song> --ice P.S: per bar, the slot the engine schedules (Beats*60/Tempo) vs the decoded clip length
+            var (mus, song) = GameData.Open(args[1], ice);
+            if (song == null) throw new ArgumentException("timing needs --ice");
+            using var lib = new ClipLibrary(GameData.ClipSources(mus, song, out _));
+            var ps = args[2].Split('.');
+            var sec = mus.Parts[int.Parse(ps[0])].Sections[int.Parse(ps[1])];
+            Console.WriteLine("bar      T   B   slot s   clip s   clip-slot  first clip");
+            for (int h = 0; h < sec.Phrases.Count; h++)
+                for (int b = 0; b < sec.Phrases[h].Bars.Count; b++)
+                    foreach (var g in sec.Phrases[h].Bars[b].Variations.Take(1).Select(g => MusPlayback.Group(mus.Version, g)))
+                    {
+                        double slot = g.Tempo > 0 ? g.Seconds : 0;
+                        double Len(MusPlayback.PlayClip c) => lib.Get(c.File) is { } pcm ? pcm[0].Length / (double)MusEngine.SampleRate : double.NaN;
+                        var c = g.Clips.FirstOrDefault(c => c.Plays);
+                        double len = c != null ? Len(c) : double.NaN;
+                        string subs = string.Join(" ", g.SubClips.Where(s => s.Plays).Select(s => $"{s.File}={Len(s):0.000}"));
+                        Console.WriteLine($"{h + 1}:{b + 1,-5} {g.Tempo,4} {g.Beats,3} {slot,8:0.000} {len,8:0.000} {len - slot,+10:0.000}  {c?.File}" +
+                                          (subs.Length > 0 ? $"  | sub {subs}" : ""));
+                    }
+            while (lib.Warnings.TryDequeue(out var w)) Console.WriteLine($"warning: {w}");
+            return 0;
+        }
+
         case "datadir" when args.Length == 1:
             Console.WriteLine(GameData.DataFolder ?? "(not set)");
             return 0;
@@ -127,9 +180,12 @@ try
         {
             string dir = Path.GetFullPath(args[1]);
             if (!Directory.Exists(dir)) throw new ArgumentException($"{dir} does not exist");
+            if (!GameData.HasGameFolders(dir)) throw new ArgumentException($"{dir} has no win32 or win32reboot folder (expected pso2_bin\\data)");
             GameData.DataFolder = dir;
-            int found = GameData.KnownSongs.Count(s => File.Exists(Path.Combine(dir, GameData.IceHash(s))));
-            Console.WriteLine($"Data folder set to {dir} ({found}/{GameData.KnownSongs.Count} known songs found)");
+            int found = GameData.KnownSongs.Count(s => GameData.FindIce(s, dir) != null);
+            Console.WriteLine($"Data folder set to {GameData.DataRoot(dir)} ({found}/{GameData.KnownSongs.Count} known classic songs found)");
+            foreach (var f in GameData.ClassicFolders(dir)) Console.WriteLine($"  classic: {f}");
+            foreach (var f in GameData.RebootFolders(dir)) Console.WriteLine($"  NGS:     {f}");
             return 0;
         }
 
@@ -138,7 +194,7 @@ try
             string? dir = GameData.DataFolder;
             foreach (var s in GameData.KnownSongs)
             {
-                bool has = dir != null && File.Exists(Path.Combine(dir, GameData.IceHash(s)));
+                bool has = dir != null && GameData.FindIce(s, dir) != null;
                 Console.WriteLine($"{(dir == null ? "" : has ? "  " : "- ")}{s,-32} {GameData.IceHash(s)}");
             }
             return 0;
@@ -201,7 +257,8 @@ try
 }
 catch (Exception e) when (e is IOException or InvalidDataException or NotSupportedException or JsonException or FormatException or ArgumentException or UnauthorizedAccessException)
 {
-    Console.Error.WriteLine($"error: {e.Message}");
+    // MUSTOOL_DEBUG=1 prints where it failed.
+    Console.Error.WriteLine(Environment.GetEnvironmentVariable("MUSTOOL_DEBUG") == "1" ? $"error: {e}" : $"error: {e.Message}");
     return 1;
 }
 
@@ -210,7 +267,7 @@ static int Usage()
     Console.Error.WriteLine("""
         MusTool - PSO2 .mus (adaptive BGM) editor
 
-          info     <file.mus>                         print the part/section/phrase tree
+          info     <file.mus> [--section P.S]         print the part/section/phrase tree, or one section's bars
           clips    <file.mus> [--check]               list every referenced .hca file (--check: with --ice, list
                                                       the ones missing from the song's CPK)
           export   <file.mus> [out.json]              convert to editable JSON
@@ -218,8 +275,9 @@ static int Usage()
           rename   <in.mus> <out.mus> <find> <repl>   substring-replace clip file names
           template <out.json>                         write a minimal JSON to start a new file
           verify   <file.mus>                         check read/write round-trips byte-for-byte
-          ui       [song]                             graphical player: browse songs, switch parts/sections
-          datadir  [pso2_bin\data\win32]              show or set the game data folder used by --ice
+          ui       [song]                             graphical player: browse songs, switch parts/sections (default with no arguments)
+          datadir  [pso2_bin\data]                    show or set the game data folder used by --ice
+                                              (classic songs from win32/win32_na, NGS from win32reboot/_na)
           songs                                       list known base-game songs and their ice hashes
           scan     [song]                             read every known song from the data folder (in memory),
                                                       report its version and whether it parses/round-trips
@@ -240,8 +298,8 @@ static int Scan(string? only, JsonSerializerOptions json)
     int missing = 0;
     foreach (var song in only != null ? [only] : GameData.KnownSongs)
     {
-        string ice = Path.Combine(dir, GameData.IceHash(song));
-        if (!File.Exists(ice)) { missing++; Console.WriteLine($"{song,-32} missing"); continue; }
+        string? ice = GameData.FindIce(song, dir);
+        if (ice == null) { missing++; Console.WriteLine($"{song,-32} missing"); continue; }
         byte version = 0;
         try
         {
@@ -256,7 +314,8 @@ static int Scan(string? only, JsonSerializerOptions json)
             var c = byVersion.GetValueOrDefault(version);
             byVersion[version] = same ? (c.ok + 1, c.failed) : (c.ok, c.failed + 1);
             Console.WriteLine($"{song,-32} v0x{version:X2}  {mus.Parts.Count} parts  {mus.Parts.Sum(p => p.Sections.Count),3} sections  " +
-                              $"{(same ? "round-trip OK (binary + JSON)" : "round-trip MISMATCH")}{(loaded.CpkPath == null ? "  (no cpk)" : "")}");
+                              $"{(same ? "round-trip OK (binary + JSON)" : "round-trip MISMATCH")}{(loaded.CpkPath == null ? "  (no cpk)" : "")}" +
+                              (MusSerializer.IsVerifiedVersion(version) ? "" : "  (version not seen before; read by range)"));
         }
         catch (Exception e) when (e is InvalidDataException or NotSupportedException or IndexOutOfRangeException or ArgumentException or OverflowException)
         {
@@ -284,16 +343,29 @@ static IEnumerable<MusClip> AllClips(MusFile mus) =>
 static void PrintInfo(MusFile mus)
 {
     if (mus.Extension is { } ext) Console.WriteLine($"name: {ext.Name}");
-    Console.WriteLine($"version 0x{mus.Version:X2}, {mus.Parts.Count} parts, {AllClips(mus).Select(c => c.File).Distinct().Count()} distinct clips");
+    Console.WriteLine($"version 0x{mus.Version:X2}{(MusSerializer.IsVerifiedVersion(mus.Version) ? "" : " (not seen before; read by version range)")}, " +
+                      $"{mus.Parts.Count} parts, {AllClips(mus).Select(c => c.File).Distinct().Count()} distinct clips, {(MusSerializer.IsNgs(mus.Version) ? "NGS (win32reboot) rules" : $"flags 0x{MusPlayback.Flags(mus):X}")}");
     foreach (var o in mus.OneShots)
-        Console.WriteLine($"one-shot: {o.File} (kind {o.Kind}, condition {o.Condition?.Name ?? "-"}, volume {o.Volume})");
+        Console.WriteLine($"one-shot: {o.File} (kind {o.Kind}, condition {o.Condition?.Name ?? "-"}, volume {o.Volume})" +
+                          (MusPlayback.UsesOneShots(mus.Version) ? "" : " - not used by the game in this version"));
     if (mus.RootInfo?.Name is { Length: > 0 } linked) Console.WriteLine($"root info: {linked}");
+    if (MusEngine.UsesBattle(mus))
+    {
+        uint flags = MusPlayback.Flags(mus);
+        var changed = Enum.GetValues<MusPlayback.BattleState>()
+            .Where(st => MusPlayback.EffectiveState(st, flags) != st)
+            .Select(st => $"{st}->{MusPlayback.EffectiveState(st, flags)}").ToList();
+        Console.WriteLine($"battle: Hero/Pinch/Pse change {((flags & MusPlayback.FlagAllParts) != 0 ? "every part" : "the part with index 1")}" +
+                          (changed.Count > 0 ? $"; flags turn {string.Join(", ", changed)}" : ""));
+    }
     for (int pi = 0; pi < mus.Parts.Count; pi++)
     {
         var part = mus.Parts[pi];
         Console.WriteLine($"Part {pi} (index {part.Index})");
-        Console.WriteLine($"  clip conditions:     {string.Join(", ", part.ClipConditions.Select(c => c.Name))}");
-        Console.WriteLine($"  sub-clip conditions: {string.Join(", ", part.SubClipConditions.Select(c => c.Name))}");
+        // NGS conditions carry 16 extra bytes; their first 4 are shown as name[aabbccdd].
+        static string CondText(MusCondition c) => c.Extra is { } x && x.Length >= 4 ? $"{c.Name}[{Convert.ToHexString(x, 0, 4)}]" : c.Name;
+        Console.WriteLine($"  clip conditions:     {string.Join(", ", part.ClipConditions.Select(CondText))}");
+        Console.WriteLine($"  sub-clip conditions: {string.Join(", ", part.SubClipConditions.Select(CondText))}");
         for (int si = 0; si < part.Sections.Count; si++)
         {
             var s = part.Sections[si];

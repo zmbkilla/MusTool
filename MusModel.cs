@@ -131,20 +131,16 @@ public sealed class MusRootInfo
     public string? Name { get; set; }
 }
 
-/// <summary>Legacy (v0x07-v0x09) layer: { Track* track; data }. Every observed layer has exactly one track.</summary>
+/// <summary>Legacy (v0x07-v0x09) layer: { Track* track; data }. The game uses one track per layer.</summary>
 public sealed class MusLayer
 {
     /// <summary>
-    /// Bytes after the track pointer. v0x07: f32 volume (0.0-1.0) + 04 01 xx 00.
-    /// v0x08/v0x09: u8 volume (0-100), 04, 01, trackCount (1).
+    /// Raw bytes after the track pointer. v0x07: f32 volume (0.0-1.0), u8 kind, u8[3].
+    /// v0x08/v0x09: u8 volume (0-100), u8 kind, u8[2]. Only kind 4 has clips; the volume scales the whole list
+    /// (it becomes the flat group's UnkE / UnkF). See MusPlayback.Group.
     /// </summary>
     [JsonConverter(typeof(HexBytesConverter))]
     public byte[] Data { get; set; } = [100, 4, 1, 1];
-
-    /// <summary>The layer's volume as a 0-1 gain.</summary>
-    public float Gain(byte version) => version == 0x07
-        ? BitConverter.ToSingle(Data, 0)
-        : Data[0] / 100f;
 }
 
 /// <summary>0x38-byte record referenced from the v0x12 root (observed name "MusicDiscTune", twice).</summary>
@@ -159,13 +155,15 @@ public sealed class MusTune
     public string Str18 { get; set; } = "";
     public uint Unk1C { get; set; }
     public string Str20 { get; set; } = "";
-    public string Str24 { get; set; } = "";
+    /// <summary>v0x12 only (tune record 0x38 bytes); null in 0x0F/0x10, whose tune record is 0x30 bytes.</summary>
+    public string? Str24 { get; set; }
     /// <summary>Observed 00 03 00 00 and 00 03 00 01.</summary>
     [JsonConverter(typeof(HexBytesConverter))]
     public byte[] Unk28 { get; set; } = [0, 3, 0, 0];
     public string Str2C { get; set; } = "";
     public uint Unk30 { get; set; }
-    public float Unk34 { get; set; } = 100f;
+    /// <summary>v0x12 only, like <see cref="Str24"/>. Observed 100.</summary>
+    public float? Unk34 { get; set; }
 }
 
 /// <summary>
@@ -188,7 +186,10 @@ public sealed class MusPart
 
 public sealed class MusCondition
 {
-    /// <summary>v0x0A only: u32 stored before the name pointer. Always 0 in observed data.</summary>
+    /// <summary>
+    /// u32 stored before the name pointer (all versions but 0x12). The game reads it as a float: the gain of this
+    /// condition's clips while the condition is not met (MusPlayback.OffGain). 0 (= silent) in every shipped file.
+    /// </summary>
     public uint Value { get; set; }
 
     public string Name { get; set; } = "Always";
@@ -241,17 +242,17 @@ public sealed class MusClipGroup
     /// <summary>Matches the B## in the clip file names (beats or bars per clip; not yet verified).</summary>
     public ushort Beats { get; set; } = 4;
 
-    /// <summary>Byte at group+0x0E. Observed 0x4A or 0x64. Possibly a volume.</summary>
+    /// <summary>Byte at group+0x0E: volume (0-100) of every clip in Clips (the game's scheduler scales by it).</summary>
     public byte UnkE { get; set; } = 0x64;
 
-    /// <summary>Byte at group+0x0F. Observed 0x4A, 0x4B or 0x64. Possibly a volume.</summary>
+    /// <summary>Byte at group+0x0F: volume (0-100) of every clip in SubClips.</summary>
     public byte UnkF { get; set; } = 0x64;
 
     /// <summary>v0x12 only: 16 bytes at +0x10. Observed all zero.</summary>
     [JsonConverter(typeof(HexBytesConverter))]
     public byte[]? Extra { get; set; }
 
-    /// <summary>Legacy only (v0x07-v0x09): the layers holding Clips / SubClips. UnkE/UnkF are unused there.</summary>
+    /// <summary>Legacy only (v0x07-v0x09): the layers holding Clips / SubClips; their volume takes the place of UnkE/UnkF.</summary>
     public MusLayer? Layer { get; set; }
     public MusLayer? SubLayer { get; set; }
 
@@ -261,7 +262,10 @@ public sealed class MusClipGroup
     /// <summary>Layered stems that play together (base, M1_, M2_, SQ_, HERO_ ...).</summary>
     public List<MusClip> Clips { get; set; } = new();
 
-    /// <summary>Second clip list (R_ tails, PSE_, pinch_ ...). Uses Part.SubClipConditions.</summary>
+    /// <summary>
+    /// Second clip list, using Part.SubClipConditions; plays by its conditions just like Clips (boss_aph APH_R /
+    /// APH_R2 layers, ancient's RandomMovement2 alternatives, PSE_, pinch_).
+    /// </summary>
     public List<MusClip> SubClips { get; set; } = new();
 }
 
@@ -279,10 +283,16 @@ public sealed class MusClip
     /// <summary>Index into the owning part's ClipConditions / SubClipConditions.</summary>
     public byte Condition { get; set; }
 
-    /// <summary>Always 1 in observed flat data. Legacy: the byte after volume (v0x07 +0x08, v0x08/09 +0x05), observed 0.</summary>
+    /// <summary>
+    /// Flat: always 1 (it is where the game puts the legacy flags byte when converting). Legacy: the kind byte
+    /// (v0x07 +0x08, v0x08/09 +0x05); the game only plays clips of kind 0.
+    /// </summary>
     public byte Unk2 { get; set; } = 1;
 
-    /// <summary>Always 0 in observed flat data. v0x07: byte +0x09, observed 0-12 (meaning unknown).</summary>
+    /// <summary>
+    /// Flat: always 0. Legacy: flags (v0x07 +0x0A, v0x08/09 +0x07). Bit 0 clear: the game ignores Condition and uses
+    /// the clip's position in its list instead (MusPlayback.Clip).
+    /// </summary>
     public byte Unk3 { get; set; }
 }
 

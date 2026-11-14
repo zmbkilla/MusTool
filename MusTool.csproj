@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <EmbeddedResource Include="songs.txt" LogicalName="MusTool.songs.txt" />
+    <EmbeddedResource Include="songs_ngs.txt" LogicalName="MusTool.songs_ngs.txt" />
     <EmbeddedResource Include="ui\index.html" LogicalName="MusTool.ui.index.html" />
   </ItemGroup>
 

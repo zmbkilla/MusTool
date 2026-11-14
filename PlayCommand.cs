@@ -9,7 +9,11 @@ public static class PlayCommand
     public const string Usage =
         "  play     <file.mus> [cpk|folder]... [options]  play the song; switch sections live\n" +
         "             --part N --section N     where to start (default 0 0)\n" +
-        "             --subclips               also play sub-clips (R_ tails, PSE_, pinch_)\n" +
+        "             --conditions A,B|all     conditions on at start (clip and sub-clip alike; default: Always,\n" +
+        "                                      *normal*, Random*; one entry of each Random* group plays)\n" +
+        "             --battle STATE           normal|hero|pinch|pse|hero+pse|pinch+pse (default normal); drives the\n" +
+        "                                      Normal/Hero/Pinch/Pse conditions like the game\n" +
+        "             --variant 1-6            which of First..Sixth is on (default 1; the game sets exactly one)\n" +
         "             --no-volume              ignore per-clip volume\n" +
         "             --key HEX                HCA key (default PSO2 CC55463930DBE1AB)\n" +
         "             --out f.wav --seconds S  render to a WAV instead of playing\n" +
@@ -24,7 +28,10 @@ public static class PlayCommand
         int part = 0, section = 0;
         string? outPath = null;
         double seconds = 60;
-        bool subClips = false, noVolume = false;
+        bool noVolume = false;
+        string? conditionArg = null;
+        var battle = MusPlayback.BattleState.Normal;
+        int variant = 0;
         ulong key = ClipLibrary.Pso2HcaKey;
         var switches = new List<(double at, int part, int section)>();
         bool ice = false;
@@ -39,7 +46,9 @@ public static class PlayCommand
                 case "--section": section = int.Parse(Next()); break;
                 case "--out": outPath = Next(); break;
                 case "--seconds": seconds = double.Parse(Next(), CultureInfo.InvariantCulture); break;
-                case "--subclips": subClips = true; break;
+                case "--conditions": conditionArg = Next(); break;
+                case "--battle": battle = ParseBattle(Next()); break;
+                case "--variant": variant = int.Parse(Next()) - 1; break;
                 case "--no-volume": noVolume = true; break;
                 case "--key": key = ulong.Parse(Next().Replace("0x", ""), NumberStyles.HexNumber); break;
                 case "--switch":
@@ -71,7 +80,15 @@ public static class PlayCommand
         }
         if (sources.Count == 0) throw new ArgumentException("play needs at least one CPK or folder with the .hca clips");
         using var library = new ClipLibrary(sources, key);
-        var engine = new MusEngine(mus, library, part, section) { PlaySubClips = subClips, ApplyClipVolume = !noVolume };
+        var engine = new MusEngine(mus, library, part, section) { ApplyClipVolume = !noVolume, Battle = battle, Variant = Math.Clamp(variant, 0, 5) };
+        if (conditionArg != null)
+        {
+            var names = MusEngine.ToggleConditions(mus);
+            var wanted = conditionArg.Equals("all", StringComparison.OrdinalIgnoreCase) ? names : conditionArg.Split(',').Select(c => c.Trim()).ToList();
+            foreach (var w in wanted.Where(w => !names.Contains(w))) throw new ArgumentException($"unknown condition {w} (this song has: {string.Join(", ", names)})");
+            engine.EnabledConditions.Clear();
+            engine.EnabledConditions.UnionWith(wanted);
+        }
 
         return outPath != null
             ? Render(engine, library, outPath, seconds, switches)
@@ -117,12 +134,12 @@ public static class PlayCommand
         if (Console.IsInputRedirected)
             throw new ArgumentException("interactive playback needs a console; use --out to render a WAV");
 
-        var conditions = mus.Parts.SelectMany(p => p.ClipConditions).Select(c => c.Name).Distinct().ToList();
+        var conditions = MusEngine.ToggleConditions(mus);
         var (selPart, selSection) = engine.Current;
 
         PrintSections(mus, selPart, selSection);
         Console.WriteLine("Keys: Up/Down select section, Left/Right select part, Enter switch (at next slot boundary),");
-        Console.WriteLine("      1-9 toggle conditions, S sub-clips, Space pause, Q quit");
+        Console.WriteLine("      1-9 toggle conditions (clip and sub-clip), B next battle state, V next variant, Space pause, Q quit");
         PrintConditions(engine, conditions);
 
         using var output = new WaveOutEvent { DesiredLatency = 150 };
@@ -163,14 +180,18 @@ public static class PlayCommand
                     engine.RequestSwitch(selPart, selSection);
                     Console.WriteLine($"  queued P{selPart} S{selSection}, switching at the next slot boundary");
                     break;
-                case ConsoleKey.S:
-                    engine.PlaySubClips = !engine.PlaySubClips;
-                    Console.WriteLine($"  sub-clips {(engine.PlaySubClips ? "on" : "off")}");
-                    break;
                 case >= ConsoleKey.D1 and <= ConsoleKey.D9 when k.Key - ConsoleKey.D1 < conditions.Count:
                     string name = conditions[k.Key - ConsoleKey.D1];
                     lock (engine.EnabledConditions)
                         if (!engine.EnabledConditions.Remove(name)) engine.EnabledConditions.Add(name);
+                    PrintConditions(engine, conditions);
+                    break;
+                case ConsoleKey.V:
+                    engine.Variant = (engine.Variant + 1) % 6;
+                    PrintConditions(engine, conditions);
+                    break;
+                case ConsoleKey.B:
+                    engine.Battle = (MusPlayback.BattleState)(((int)engine.Battle + 1) % 6);
                     PrintConditions(engine, conditions);
                     break;
             }
@@ -211,9 +232,18 @@ public static class PlayCommand
     static void PrintConditions(MusEngine engine, List<string> conditions)
     {
         lock (engine.EnabledConditions)
-            Console.WriteLine("  conditions: " + string.Join("  ", conditions.Select((c, i) =>
+            Console.WriteLine($"  battle: {BattleName(engine.Battle)}  variant: {MusPlayback.VariantConditions[engine.Variant]}  conditions: " + string.Join("  ", conditions.Select((c, i) =>
                 $"{i + 1}:{c}[{(engine.EnabledConditions.Contains(c) ? "on" : "off")}]")));
     }
+
+    static readonly string[] BattleNames = ["normal", "hero", "pinch", "pse", "hero+pse", "pinch+pse"];
+
+    static string BattleName(MusPlayback.BattleState state) => BattleNames[(int)state];
+
+    static MusPlayback.BattleState ParseBattle(string text) =>
+        Array.IndexOf(BattleNames, text.ToLowerInvariant()) is var i and >= 0
+            ? (MusPlayback.BattleState)i
+            : throw new ArgumentException($"unknown battle state {text} (use {string.Join(", ", BattleNames)})");
 
     sealed class EngineProvider(MusEngine engine) : ISampleProvider
     {

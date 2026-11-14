@@ -33,10 +33,13 @@ namespace MusTool;
 //   Clip      (8)         { char* hcaName; u8 volume; u8 condition; u8 unk2; u8 unk3 }
 //   legacy (v07-v09), ClipGroup -> Layer -> Track -> Clip* -> Clip -> char*[]:
 //   ClipGroup (0x14 / 12) { Layer* clips; Layer* subClips;  v07: u32 tempo; u32 unk; u32 beats   v08/09: u16 tempo; u16 beats }
-//   Layer     (0x0C / 8)  { Track* track;  v07: f32 volume; u8[4]   v08/09: u8 volume; u8; u8; u8 trackCount }
+//   Layer     (0x0C / 8)  { Track* track;  v07: f32 volume; u8 kind (4 = has clips); u8[3]
+//                                          v08/09: u8 volume; u8 kind; u8[2] }
 //   Track     (8)         { Clip** clips; u32 clipCount }   (empty: pointer past REL0, see MusFile.EmptyListBase)
-//   Clip      (0x0C / 8)  { char** names;  v07: f32 volume; u8 unk2; u8 unk3; u8 condition; u8 0
-//                           v08/09: u8 volume; u8 unk2; u8 condition; u8 nameCount }
+//   Clip      (0x0C / 8)  { char** names;  v07: f32 volume; u8 kind (0 = plays); u8 condition; u8 flags; u8 0
+//                           v08/09: u8 volume; u8 kind; u8 condition; u8 flags }
+//   flags bit 0 clear: the condition is the clip's position in the list, not the stored byte.
+//   Bytes are kept raw here; MusPlayback turns them into what the game plays.
 //
 // Writer emits data in the same order the original tool did (bottom-up, strings last), so an
 // unmodified file round-trips byte-for-byte.
@@ -50,6 +53,15 @@ public static class MusSerializer
     public const byte Version0C = 0x0C;
     public const byte Version12 = 0x12;
 
+    /// <summary>
+    /// First NGS (win32reboot) version. NGS files seen: 0x0F, 0x10, 0x12. 0x0D/0x0E are unseen and stay on the
+    /// classic range rules. NGS is handled apart from classic everywhere: its own layout here, its own playback
+    /// rules in MusPlayback (none of the classic pso2.exe findings are applied to it).
+    /// </summary>
+    public const byte FirstNgsVersion = 0x0F;
+
+    public static bool IsNgs(byte version) => version >= FirstNgsVersion;
+
     const uint SentinelOffset = 0x10;
 
     enum Family { Legacy07, Legacy08, Flat, Ngs }
@@ -61,18 +73,30 @@ public static class MusSerializer
         public int LayerSize => Family == Family.Legacy07 ? 0x0C : 8;
         public int LegacyClipSize => Family == Family.Legacy07 ? 0x0C : 8;
 
+        /// <summary>
+        /// Picks the layout by version range, the way the game's loader does (pso2.exe FUN_0056da70 / FUN_0056cd70 /
+        /// FUN_0056df40): clip groups and clips are "&lt; 8", "8-9" or "10 and later"; the root is "&lt; 9", "9-10" or
+        /// "later". Classic versions in between the ones seen (0x0D/0x0E) therefore read like their neighbours. The
+        /// game rejects 6 and below. NGS versions (0x0F and later) use the NGS layout.
+        /// </summary>
         public static Layout For(byte version) => version switch
         {
-            Version07 => new Layout(Family.Legacy07, 0x08, 8, 8, 0x14),
-            Version08 => new Layout(Family.Legacy08, 0x08, 8, 8, 0x0C),
-            Version09 => new Layout(Family.Legacy08, 0x10, 8, 8, 0x0C),
-            Version0A => new Layout(Family.Flat, 0x10, 8, 8, 0x10),
-            Version0B or Version0C => new Layout(Family.Flat, 0x1C, 8, 8, 0x10),
-            Version12 => new Layout(Family.Ngs, 0xB4, 0x2C, 0x14, 0x20),
-            _ => throw new NotSupportedException(
-                $"Unsupported .mus version 0x{version:X2} (known: 0x07-0x0C, 0x12). A sample of this file is needed to add it."),
+            <= 6 => throw new NotSupportedException($".mus version 0x{version:X2} is older than any the game accepts (7 and later)."),
+            7 => new Layout(Family.Legacy07, 0x08, 8, 8, 0x14),
+            8 => new Layout(Family.Legacy08, 0x08, 8, 8, 0x0C),
+            9 => new Layout(Family.Legacy08, 0x10, 8, 8, 0x0C),
+            10 => new Layout(Family.Flat, 0x10, 8, 8, 0x10),
+            < FirstNgsVersion => new Layout(Family.Flat, 0x1C, 8, 8, 0x10),
+            // NGS: clip groups are 0x10 bytes in 0x0F (like classic flat) and 0x20 from 0x10 on (16 extra bytes).
+            _ => new Layout(Family.Ngs, 0xB4, 0x2C, 0x14, version == FirstNgsVersion ? 0x10 : 0x20),
         };
     }
+
+    /// <summary>Versions whose layout was checked against real files; others are read by range (see Layout.For).</summary>
+    public static bool IsVerifiedVersion(byte version) => version is >= Version07 and <= Version0C or 0x0F or 0x10 or Version12;
+
+    /// <summary>The game treats clip records as legacy (layer/track/clip tree) below version 10.</summary>
+    public static bool IsLegacy(byte version) => version < Version0A;
 
     // ---------------------------------------------------------------- reading
 
@@ -144,8 +168,8 @@ public static class MusSerializer
 
         if (layout.Extended)
         {
-            if (r.U32(root + 0x14) != SentinelOffset)
-                throw new NotSupportedException("Root list at +0x14 is not empty in this file; its format is unknown. A sample is needed.");
+            // Root+0x14: one-shot list, same records as classic (count in the last byte of Unk10).
+            ReadOneShots(r, r.U32(root + 0x14), r.U8(root + 0x13), mus.OneShots);
             var ext = new MusRootExtension
             {
                 Unk10 = r.Bytes(root + 0x10, 4),
@@ -157,7 +181,7 @@ public static class MusSerializer
             };
             uint tunes = r.U32(root + 0x24);
             for (int i = 0; i < ext.Unk20[0]; i++)
-                ext.Tunes.Add(ReadTune(r, tunes + (uint)i * 0x38));
+                ext.Tunes.Add(ReadTune(r, tunes + (uint)(i * TuneSize(mus.Version)), mus.Version));
             mus.Extension = ext;
         }
 
@@ -217,6 +241,9 @@ public static class MusSerializer
         int trailerStart = (int)r.StringsEnd;
         int trailerEnd = relEnd;
         while (trailerEnd > trailerStart && data[relBase + trailerEnd - 1] == 0) trailerEnd--;
+        // Some NGS files pad REL0 with a whole extra 16-byte zero block that the writer's alignment would not
+        // recreate; keep the zeros in the trailer then (NGS only; classic files never need it).
+        if (layout.Extended && (int)Align((uint)Math.Max(trailerEnd, trailerStart), 16) != relEnd) trailerEnd = relEnd;
         mus.Trailer = data.AsSpan(relBase + trailerStart, Math.Max(0, trailerEnd - trailerStart)).ToArray();
         return mus;
     }
@@ -241,23 +268,31 @@ public static class MusSerializer
         }
     }
 
-    static MusTune ReadTune(RelReader r, uint t) => new()
+    /// <summary>NGS tune record size: 0x30 in 0x0F/0x10, 0x38 from 0x12 on (adds Str24 and Unk34).</summary>
+    static int TuneSize(byte version) => version >= Version12 ? 0x38 : 0x30;
+
+    static MusTune ReadTune(RelReader r, uint t, byte version)
     {
-        Unk00 = r.U32(t),
-        Name = r.Str(r.U32(t + 0x04)),
-        Unk08 = r.U32(t + 0x08),
-        Unk0C = r.F32(t + 0x0C),
-        Unk10 = r.U32(t + 0x10),
-        Str14 = r.Str(r.U32(t + 0x14)),
-        Str18 = r.Str(r.U32(t + 0x18)),
-        Unk1C = r.U32(t + 0x1C),
-        Str20 = r.Str(r.U32(t + 0x20)),
-        Str24 = r.Str(r.U32(t + 0x24)),
-        Unk28 = r.Bytes(t + 0x28, 4),
-        Str2C = r.Str(r.U32(t + 0x2C)),
-        Unk30 = r.U32(t + 0x30),
-        Unk34 = r.F32(t + 0x34),
-    };
+        bool wide = TuneSize(version) == 0x38;
+        uint x = wide ? 4u : 0u; // fields after Str20 shift by the extra string in the wide record
+        return new MusTune
+        {
+            Unk00 = r.U32(t),
+            Name = r.Str(r.U32(t + 0x04)),
+            Unk08 = r.U32(t + 0x08),
+            Unk0C = r.F32(t + 0x0C),
+            Unk10 = r.U32(t + 0x10),
+            Str14 = r.Str(r.U32(t + 0x14)),
+            Str18 = r.Str(r.U32(t + 0x18)),
+            Unk1C = r.U32(t + 0x1C),
+            Str20 = r.Str(r.U32(t + 0x20)),
+            Str24 = wide ? r.Str(r.U32(t + 0x24)) : null,
+            Unk28 = r.Bytes(t + 0x24 + x, 4),
+            Str2C = r.Str(r.U32(t + 0x28 + x)),
+            Unk30 = r.U32(t + 0x2C + x),
+            Unk34 = wide ? r.F32(t + 0x34) : null,
+        };
+    }
 
     static MusClipGroup ReadGroup(RelReader r, uint g, Layout layout)
     {
@@ -267,7 +302,7 @@ public static class MusSerializer
             Beats = r.U16(g + 10),
             UnkE = r.U8(g + 14),
             UnkF = r.U8(g + 15),
-            Extra = layout.Extended ? r.Bytes(g + 16, 16) : null,
+            Extra = layout.Group == 0x20 ? r.Bytes(g + 16, 16) : null,
         };
         ReadClips(r, r.U32(g), r.U8(g + 12), group.Clips);
         ReadClips(r, r.U32(g + 4), r.U8(g + 13), group.SubClips);
@@ -314,9 +349,8 @@ public static class MusSerializer
     {
         var r = ctx.R;
         bool v07 = ctx.Layout.Family == Family.Legacy07;
+        // Raw bytes only; what they mean for playback is in MusPlayback (as the game uses one track per layer).
         var layer = new MusLayer { Data = r.Bytes(l + 4, ctx.Layout.LayerSize - 4) };
-        if (!v07 && layer.Data[3] != 1)
-            throw new NotSupportedException($"Layer with {layer.Data[3]} tracks; only single-track layers are known. A sample is needed.");
 
         uint track = r.U32(l);
         uint list = r.U32(track), count = r.U32(track + 4);
@@ -332,11 +366,12 @@ public static class MusSerializer
             var clip = new MusClip { File = r.Str(r.U32(names)) };
             if (v07)
             {
+                // Same byte roles as 0x08/0x09 after a float volume. Stored raw; MusPlayback.Clip interprets them.
                 clip.VolumeF = r.F32(c + 4);
-                clip.Volume = (byte)Math.Clamp(Math.Round(clip.VolumeF.Value * 100), 0, 255);
+                clip.Volume = MusPlayback.LegacyVolume(clip.VolumeF.Value);
                 clip.Unk2 = r.U8(c + 8);
-                clip.Unk3 = r.U8(c + 9);
-                clip.Condition = r.U8(c + 10);
+                clip.Condition = r.U8(c + 9);
+                clip.Unk3 = r.U8(c + 10);
                 if (r.U8(c + 11) != 0)
                     throw new NotSupportedException($"v0x07 clip {clip.File} has a non-zero last byte. A sample is needed.");
             }
@@ -345,8 +380,7 @@ public static class MusSerializer
                 clip.Volume = r.U8(c + 4);
                 clip.Unk2 = r.U8(c + 5);
                 clip.Condition = r.U8(c + 6);
-                if (r.U8(c + 7) != 1)
-                    throw new NotSupportedException($"Clip {clip.File} lists {r.U8(c + 7)} file names; only 1 is known. A sample is needed.");
+                clip.Unk3 = r.U8(c + 7);
             }
             into.Add(clip);
         }
@@ -381,7 +415,7 @@ public static class MusSerializer
         var layout = Layout.For(mus.Version);
         if (layout.Extended && mus.Extension is null)
             throw new InvalidDataException("Version 0x12 files need an Extension block.");
-        if (mus.OneShots.Count > 0 && !(layout.Root == 0x1C || (layout.Root == 0x10 && layout.Family == Family.Flat && mus.RootList0C)))
+        if (mus.OneShots.Count > 0 && !(layout.Extended || layout.Root == 0x1C || (layout.Root == 0x10 && layout.Family == Family.Flat && mus.RootList0C)))
             throw new InvalidDataException($"One-shot sounds need version 0x0B/0x0C, or 0x0A with RootList0C set (this file is 0x{mus.Version:X2}).");
 
         var w = new RelWriter();
@@ -427,7 +461,7 @@ public static class MusSerializer
                             w.U8(Count(g.SubClips.Count, "sub-clips in a group"));
                             w.U8(g.UnkE);
                             w.U8(g.UnkF);
-                            if (layout.Extended) w.Fixed(g.Extra, 16);
+                            if (layout.Group == 0x20) w.Fixed(g.Extra, 16);
                         }
                     }
 
@@ -547,7 +581,7 @@ public static class MusSerializer
         if (layout.Extended && ext!.Tunes.Count > 0)
         {
             tunesOffset = w.Pos;
-            foreach (var t in ext.Tunes) WriteTune(w, t);
+            foreach (var t in ext.Tunes) WriteTune(w, t, mus.Version);
         }
 
         uint root = w.Pos;
@@ -574,8 +608,10 @@ public static class MusSerializer
         }
         if (layout.Extended)
         {
-            w.Fixed(ext!.Unk10, 4);
-            w.Ptr(SentinelOffset);
+            var unk10 = (byte[])Fixed(ext!.Unk10, 4).Clone();
+            unk10[3] = Count(mus.OneShots.Count, "one-shots");
+            w.Bytes(unk10);
+            w.Ptr(oneShotsOffset);
             w.Fixed(ext.Unk18, 4);
             w.StrPtr(ext.Name);
             var unk20 = (byte[])Fixed(ext.Unk20, 4).Clone();
@@ -634,8 +670,9 @@ public static class MusSerializer
 
     static uint WithCount(uint value, int count) => (value & 0x00FFFFFF) | ((uint)Count(count, "one-shot sounds") << 24);
 
-    static void WriteTune(RelWriter w, MusTune t)
+    static void WriteTune(RelWriter w, MusTune t, byte version)
     {
+        bool wide = TuneSize(version) == 0x38;
         w.U32(t.Unk00);
         w.StrPtr(t.Name);
         w.U32(t.Unk08);
@@ -645,11 +682,11 @@ public static class MusSerializer
         w.StrPtr(t.Str18);
         w.U32(t.Unk1C);
         w.StrPtr(t.Str20);
-        w.StrPtr(t.Str24);
+        if (wide) w.StrPtr(t.Str24 ?? "");
         w.Fixed(t.Unk28, 4);
         w.StrPtr(t.Str2C);
         w.U32(t.Unk30);
-        w.F32(t.Unk34);
+        if (wide) w.F32(t.Unk34 ?? 100f);
     }
 
     static uint WriteClips(RelWriter w, List<MusClip> clips)
@@ -682,8 +719,8 @@ public static class MusSerializer
             {
                 w.F32(c.VolumeF ?? c.Volume / 100f);
                 w.U8(c.Unk2);
-                w.U8(c.Unk3);
                 w.U8(c.Condition);
+                w.U8(c.Unk3);
                 w.U8(0);
             }
             else
@@ -691,7 +728,7 @@ public static class MusSerializer
                 w.U8(c.Volume);
                 w.U8(c.Unk2);
                 w.U8(c.Condition);
-                w.U8(1);
+                w.U8(c.Unk3);
             }
         }
         uint array = w.Pos;
@@ -704,9 +741,7 @@ public static class MusSerializer
 
         uint at = w.Pos;
         w.Ptr(track);
-        var data = (byte[])Fixed(layer?.Data ?? (v07 ? [0, 0, 0x80, 0x3F, 4, 1, 0, 0] : [100, 4, 1, 1]), layout.LayerSize - 4).Clone();
-        if (!v07) data[3] = 1; // track count
-        w.Bytes(data);
+        w.Fixed(layer?.Data ?? (v07 ? [0, 0, 0x80, 0x3F, 4, 1, 0, 0] : [100, 4, 1, 1]), layout.LayerSize - 4);
         return at;
     }
 

@@ -10,7 +10,7 @@ namespace MusTool;
 /// <summary>
 /// Graphical player (MusTool ui). The page (ui/index.html, embedded) talks to this host with JSON messages:
 /// page -> host { type: "ready" | "browseData" | "open" | "openFile" | "switch" | "transport" | "condition" |
-///                       "subclips" | "volume" | "oneShot", ... }
+///                       "battle" | "variant" | "randomPick" | "volume" | "oneShot", ... }
 /// host -> page { type: "init" | "song" | "status" | "slots" | "log" | "error", ... }
 /// </summary>
 public sealed class UiHost : IDisposable
@@ -24,6 +24,7 @@ public sealed class UiHost : IDisposable
     ClipLibrary? library;
     MusEngine? engine;
     MusFile? mus;
+    int versionScan; // bumped when the data folder changes; stops an older background version read
     float volume = 0.8f;
     Timer? statusTimer;
 
@@ -120,7 +121,18 @@ public sealed class UiHost : IDisposable
                             if ((bool)m["on"]!) engine.EnabledConditions.Add(name); else engine.EnabledConditions.Remove(name);
                         }
                     break;
-                case "subclips": if (engine != null) engine.PlaySubClips = (bool)m!["on"]!; break;
+                case "variant":
+                    if (engine != null) engine.Variant = Math.Clamp((int)m!["index"]!, 0, 5);
+                    break;
+                case "battle":
+                    if (engine != null) engine.Battle = (MusPlayback.BattleState)(int)m!["state"]!;
+                    break;
+                case "randomPick":
+                {
+                    int entry = (int)m!["entry"]!;
+                    engine?.PinRandom((int)m["part"]!, (bool)m["sub"]!, (string)m["name"]!, entry < 0 ? null : entry);
+                    break;
+                }
                 case "clipVolume": if (engine != null) engine.ApplyClipVolume = (bool)m!["on"]!; break;
                 case "volume":
                     volume = Math.Clamp((float)(double)m!["value"]!, 0f, 1f);
@@ -146,18 +158,47 @@ public sealed class UiHost : IDisposable
         {
             type = "init",
             dataFolder = dir,
-            songs = GameData.KnownSongs.Select(s => new
+            // kind: "classic" (win32) or "ngs" (win32reboot); the page lists one kind at a time.
+            songs = GameData.KnownSongs.Select(s => (s, kind: "classic")).Concat(GameData.KnownNgsSongs.Select(s => (s, kind: "ngs")))
+                .Select(x => new { name = x.s, x.kind, present = dir != null && GameData.FindIce(x.s, dir) != null }),
+        });
+        ReadVersions(dir);
+    }
+
+    /// <summary>
+    /// Reads every present song's .mus version in the background (in memory, nothing written) and sends them in
+    /// batches as { type: "versions", versions: { song: "0x0A" | "error" } } for the song list's version filter.
+    /// </summary>
+    void ReadVersions(string? dir)
+    {
+        int scan = Interlocked.Increment(ref versionScan);
+        if (dir == null) return;
+        var present = GameData.KnownSongs.Concat(GameData.KnownNgsSongs).Where(s => GameData.FindIce(s, dir) != null).ToList();
+        Task.Run(() =>
+        {
+            var batch = new Dictionary<string, string>();
+            foreach (var song in present)
             {
-                name = s,
-                present = dir != null && File.Exists(Path.Combine(dir, GameData.IceHash(s))),
-            }),
+                if (scan != Volatile.Read(ref versionScan)) return;
+                try { batch[song] = $"0x{MusSerializer.Read(GameData.LoadIce(GameData.FindIce(song, dir)!, song).MusBytes).Version:X2}"; }
+                catch { batch[song] = "error"; }
+                if (batch.Count >= 20) Flush();
+            }
+            Flush();
+
+            void Flush()
+            {
+                if (batch.Count == 0 || scan != Volatile.Read(ref versionScan)) return;
+                Send(new { type = "versions", versions = new Dictionary<string, string>(batch) });
+                batch.Clear();
+            }
         });
     }
 
     void BrowseData()
     {
         string? start = GameData.DataFolder is { } d && Directory.Exists(d) ? d : null;
-        var picked = window.ShowOpenFolder("Select pso2_bin\\data\\win32", start, false);
+        var picked = window.ShowOpenFolder("Select pso2_bin\\data", start, false);
         if (picked is not [var dir, ..] || string.IsNullOrEmpty(dir)) return;
         GameData.DataFolder = dir;
         SendInit();
@@ -212,9 +253,27 @@ public sealed class UiHost : IDisposable
             version = $"0x{file.Version:X2}",
             cpks = sources.Select(s => new { song = GameData.SongForCpk(s), file = Path.GetFileName(s), own = s == ice?.CpkPath }),
             missingClips = notFound.Count,
+            oneShotsUsed = MusPlayback.UsesOneShots(file.Version),
             oneShots = file.OneShots.Select(o => new { file = o.File, kind = o.Kind, condition = o.Condition?.Name }),
             linked = file.RootInfo?.Name,
-            conditions = file.Parts.SelectMany(p => p.ClipConditions).Select(c => c.Name).Distinct(),
+            conditions = MusEngine.ToggleConditions(file),
+            usesVariant = MusEngine.UsesVariant(file),
+            // Normal/Hero/Pinch/Pse follow the battle state. "becomes" is what each state turns into under the song's flags.
+            battle = MusEngine.UsesBattle(file) ? new
+            {
+                flags = $"0x{MusPlayback.Flags(file):X}",
+                allParts = (MusPlayback.Flags(file) & MusPlayback.FlagAllParts) != 0,
+                becomes = Enum.GetValues<MusPlayback.BattleState>().Select(st => (int)MusPlayback.EffectiveState(st, MusPlayback.Flags(file))),
+            } : null,
+            enabledConditions = MusEngine.DefaultConditions(file),
+            // Random* alternatives; each entry is labelled with the first clip that uses it (e.g. A_N_R_M06_1_T065_B03).
+            randomGroups = newEngine.RandomGroups.Select(g => new
+            {
+                part = g.Part,
+                sub = g.Sub,
+                name = g.Name,
+                entries = g.Entries.Select(e => new { index = e, label = FirstClipFor(file.Version, file.Parts[g.Part], g.Sub, e) }),
+            }),
             parts = file.Parts.Select((p, pi) => new
             {
                 index = pi,
@@ -225,17 +284,23 @@ public sealed class UiHost : IDisposable
                     type = s.Type,
                     unk2 = s.Unk2,
                     unk3 = s.Unk3,
-                    phrases = s.Phrases.Select(h => h.Bars.Select(b => b.Variations.Select(g => new
+                    // As the game plays it (MusPlayback): resolved conditions and volumes, skipped records left out.
+                    phrases = s.Phrases.Select(h => h.Bars.Select(b => b.Variations.Select(g => MusPlayback.Group(file.Version, g)).Select(g => new
                     {
                         tempo = g.Tempo,
                         beats = g.Beats,
-                        clips = g.Clips.Where(c => c.File.Length > 0).Select(c => new { file = c.File, volume = c.Volume, condition = c.Condition }),
-                        subClips = g.SubClips.Where(c => c.File.Length > 0).Select(c => new { file = c.File, volume = c.Volume, condition = c.Condition }),
+                        clips = g.Clips.Where(c => c.Plays).Select(c => new { file = c.File, volume = c.Volume * g.MainVolume / 100, condition = c.Condition }),
+                        subClips = g.SubClips.Where(c => c.Plays).Select(c => new { file = c.File, volume = c.Volume * g.SubVolume / 100, condition = c.Condition }),
                     }))),
                 }),
             }),
         });
     }
+
+    static string FirstClipFor(byte version, MusPart part, bool sub, int condition) =>
+        part.Sections.SelectMany(s => s.Phrases).SelectMany(h => h.Bars).SelectMany(b => b.Variations)
+            .Select(g => MusPlayback.Group(version, g)).SelectMany(g => sub ? g.SubClips : g.Clips)
+            .FirstOrDefault(c => c.Condition == condition && c.Plays)?.File.Replace(".hca", "") ?? $"entry {condition}";
 
     void Transport(string action, JsonNode m)
     {
@@ -263,10 +328,11 @@ public sealed class UiHost : IDisposable
     {
         MusEngine? e;
         ClipLibrary? lib;
+        MusFile? song;
         bool playing;
         lock (audioLock)
         {
-            (e, lib) = (engine, library);
+            (e, lib, song) = (engine, library, mus);
             playing = output?.PlaybackState == PlaybackState.Playing;
         }
         if (e == null) return;
@@ -295,6 +361,15 @@ public sealed class UiHost : IDisposable
             tempo = p.Tempo,
             beats = p.Beats,
             progress = p.SlotProgress,
+            battle = (int)e.Battle,
+            variant = e.Variant,
+            // Per part: which condition entries play right now (battle state, toggles, random picks).
+            met = song?.Parts.Select((pt, pi) => new
+            {
+                main = pt.ClipConditions.Select((_, i) => e.IsMet(pi, false, i)).ToArray(),
+                sub = pt.SubClipConditions.Select((_, i) => e.IsMet(pi, true, i)).ToArray(),
+            }).ToArray(),
+            picks = e.RandomGroups.Select(g => new { part = g.Part, sub = g.Sub, name = g.Name, current = g.Current, pinned = g.Pinned }),
             pending = p.Pending is { } t ? new { part = t.part, section = t.section } : null,
             slots,
             warnings,

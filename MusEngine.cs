@@ -128,6 +128,7 @@ public sealed class MusEngine
     readonly Random random = new();
 
     int part, section, phrase, bar = -1;
+    int step; // NGS: which of the bar's clip groups is playing (they play in order; see MusPlayback.Ngs.GroupsInSequence)
     long now;
     double nextSlotAt, slotStartedAt;
     MusClipGroup? currentGroup;
@@ -147,16 +148,125 @@ public sealed class MusEngine
         CheckTarget(part, section);
         this.part = part;
         this.section = section;
-        foreach (var p in mus.Parts)
-            foreach (var c in p.ClipConditions) EnabledConditions.Add(c.Name);
+        EnabledConditions.UnionWith(DefaultConditions(mus));
+        for (int pi = 0; pi < mus.Parts.Count; pi++)
+            foreach (var (list, sub) in new[] { (mus.Parts[pi].ClipConditions, false), (mus.Parts[pi].SubClipConditions, true) })
+                foreach (var g in list.Select((c, i) => (Key: RandomKey(c), i)).GroupBy(x => x.Key).Where(g => g.Key != null && g.Count() > 1))
+                    randomGroups.Add(new RandomGroup(pi, sub, g.Key!, g.Select(x => x.i).ToList()));
+        Reroll(part);
         PrefetchSlot(part, section, 0, 0);
     }
 
-    /// <summary>Clip conditions (by name) whose clips are played. Default: all clip conditions on.</summary>
-    public HashSet<string> EnabledConditions { get; } = new(StringComparer.Ordinal);
+    static bool IsRandom(string name) => name.StartsWith("Random", StringComparison.Ordinal);
 
-    /// <summary>Play ClipGroup.SubClips too (R_ tails, PSE_, pinch_ ...). Off by default.</summary>
-    public bool PlaySubClips { get; set; }
+    /// <summary>
+    /// Which random group a condition entry belongs to (null: none). Classic: entries sharing a Random* name.
+    /// NGS: the condition's own extra bytes number its group (byte 1) and mode (byte 2); rg01_01night has four
+    /// groups of three entries all named "Random", so grouping by name alone would merge them into one.
+    /// </summary>
+    string? RandomKey(MusCondition c)
+    {
+        if (!IsRandom(c.Name)) return null;
+        if (MusSerializer.IsNgs(mus.Version) && c.Extra is { Length: >= 3 } x) return $"{c.Name} g{x[1]}.{x[2]}";
+        return c.Name;
+    }
+
+    /// <summary>
+    /// Condition entries of one part that share a Random* name (ancient: four sub-clip entries all named
+    /// RandomMovement2). They are alternatives: one entry plays, picked again each time a section starts,
+    /// unless <see cref="Pinned"/> fixes it.
+    /// </summary>
+    public sealed class RandomGroup(int part, bool sub, string name, IReadOnlyList<int> entries)
+    {
+        public int Part { get; } = part;
+        public bool Sub { get; } = sub;
+        public string Name { get; } = name;
+        /// <summary>Condition indexes in the part's ClipConditions (or SubClipConditions when Sub).</summary>
+        public IReadOnlyList<int> Entries { get; } = entries;
+        public int Current { get; internal set; } = entries[0];
+        public int? Pinned { get; internal set; }
+    }
+
+    readonly List<RandomGroup> randomGroups = new();
+
+    public IReadOnlyList<RandomGroup> RandomGroups => randomGroups;
+
+    /// <summary>Fixes a random group to one entry, or with null lets it pick at random again.</summary>
+    public void PinRandom(int targetPart, bool sub, string name, int? entry)
+    {
+        lock (gate)
+            foreach (var g in randomGroups.Where(g => g.Part == targetPart && g.Sub == sub && g.Name == name))
+            {
+                if (entry is { } e && !g.Entries.Contains(e)) throw new ArgumentOutOfRangeException(nameof(entry));
+                g.Pinned = entry;
+                if (entry is { } pick) g.Current = pick;
+            }
+    }
+
+    void Reroll(int targetPart)
+    {
+        foreach (var g in randomGroups.Where(g => g.Part == targetPart))
+            g.Current = g.Pinned ?? g.Entries[random.Next(g.Entries.Count)];
+    }
+
+    /// <summary>
+    /// Conditions on at start, for clips and sub-clips alike. Conditions are game states and many are alternatives
+    /// (aph_normal / aph_pinch, pk_win / pk_lose, male / female), so turning all on layers versions that never
+    /// play together. On: "Always", names containing "normal", the RandomMovement/RandomPhrase layers (one entry
+    /// of each plays, see <see cref="RandomGroups"/>); if that leaves only "Always", the first other condition.
+    /// Off: pinch and other situational states. Normal/Hero/Pinch/Pse are left out: <see cref="Battle"/> drives them.
+    /// </summary>
+    public static HashSet<string> DefaultConditions(MusFile mus)
+    {
+        var names = ToggleConditions(mus);
+        var on = names.Where(n => n == "Always"
+                                  || n.Contains("normal", StringComparison.OrdinalIgnoreCase)
+                                  || n.StartsWith("RandomMovement") || n.StartsWith("RandomPhrase"))
+                      .ToHashSet(StringComparer.Ordinal);
+        // NGS: Random layers are part of the music (one entry per numbered group plays), so they start on.
+        if (MusSerializer.IsNgs(mus.Version)) on.UnionWith(names.Where(IsRandom));
+        if (on.All(n => n == "Always") && names.FirstOrDefault(n => n != "Always") is { } first) on.Add(first);
+        return on;
+    }
+
+    /// <summary>Every condition name of the song, clip conditions first, then sub-clip-only ones.</summary>
+    public static List<string> ConditionNames(MusFile mus) =>
+        mus.Parts.SelectMany(p => p.ClipConditions).Concat(mus.Parts.SelectMany(p => p.SubClipConditions))
+           .Select(c => c.Name).Distinct().ToList();
+
+    /// <summary><see cref="ConditionNames"/> without Normal/Hero/Pinch/Pse, which follow <see cref="Battle"/> instead.</summary>
+    public static List<string> ToggleConditions(MusFile mus) => MusSerializer.IsNgs(mus.Version)
+        ? ConditionNames(mus) // NGS: every condition is a plain toggle (see MusPlayback.Ngs)
+        : ConditionNames(mus).Where(n => !MusPlayback.IsBattleCondition(n) && MusPlayback.VariantIndex(n) < 0).ToList();
+
+    /// <summary>True when the song has First..Sixth clips, i.e. <see cref="Variant"/> changes what plays.</summary>
+    public static bool UsesVariant(MusFile mus) =>
+        !MusSerializer.IsNgs(mus.Version) && ConditionNames(mus).Any(n => MusPlayback.VariantIndex(n) >= 0);
+
+    /// <summary>Which of First..Sixth is on (0-5); exactly one is, as in the game. Takes effect at the next slot.</summary>
+    public int Variant { get; set; }
+
+    /// <summary>True when the song has Normal/Hero/Pinch/Pse clips, i.e. the battle state changes what plays.</summary>
+    public static bool UsesBattle(MusFile mus) =>
+        !MusSerializer.IsNgs(mus.Version) && ConditionNames(mus).Any(MusPlayback.IsBattleCondition);
+
+    /// <summary>
+    /// The game's battle state. It turns Normal/Hero/Pinch/Pse on and off and can silence a list of the battle
+    /// part (see <see cref="MusPlayback.BattleAllows"/>). Takes effect at the next slot.
+    /// </summary>
+    public MusPlayback.BattleState Battle { get; set; } = MusPlayback.BattleState.Normal;
+
+    /// <summary>Whether the game would play clips of this condition entry now (state, toggles and random picks).</summary>
+    public bool IsMet(int partIndex, bool sub, int index)
+    {
+        lock (gate) return Met(partIndex, sub, index);
+    }
+
+    /// <summary>
+    /// Condition names (clip and sub-clip conditions alike) whose clips are played. Starts as
+    /// <see cref="DefaultConditions"/>. Sub-clips follow these exactly like the main clips do.
+    /// </summary>
+    public HashSet<string> EnabledConditions { get; } = new(StringComparer.Ordinal);
 
     /// <summary>Apply MusClip.Volume (assumed 0-100) as gain.</summary>
     public bool ApplyClipVolume { get; set; } = true;
@@ -259,33 +369,32 @@ public sealed class MusEngine
         bool switched = false;
         if (pending is { } target)
         {
-            (part, section, phrase, bar) = (target.part, target.section, 0, 0);
+            (part, section, phrase, bar, step) = (target.part, target.section, 0, 0, 0);
             pending = null;
             switched = true;
         }
         else Advance();
 
+        if (phrase == 0 && bar == 0 && step == 0) Reroll(part); // each pass through a section picks its random entries again
         var sec = mus.Parts[part].Sections[section];
         var barList = sec.Phrases.Count > 0 ? sec.Phrases[phrase].Bars : [];
         var bar0 = barList.Count > 0 ? barList[bar] : null;
-        var group = bar0 is { Variations.Count: > 0 } ? bar0.Variations[random.Next(bar0.Variations.Count)] : null;
+        var group = bar0 is not { Variations.Count: > 0 } ? null
+            : MusPlayback.Ngs.GroupsInSequence(mus.Version) ? bar0.Variations[Math.Min(step, bar0.Variations.Count - 1)]
+            : bar0.Variations[random.Next(bar0.Variations.Count)];
+        var play = group != null ? MusPlayback.Group(mus.Version, group) : null;
 
-        double seconds = group is { Tempo: > 0 } ? group.Beats * 60.0 / group.Tempo : 1.0;
+        double seconds = play?.Seconds ?? 1.0;
         slotStartedAt = now;
         if (nextSlotAt < now - 1) nextSlotAt = now; // only after an immediate switch; keeps fractional timing otherwise
         nextSlotAt += seconds * SampleRate;
         currentGroup = group;
 
         var started = new List<string>();
-        if (group != null)
+        if (play != null)
         {
-            var p = mus.Parts[part];
-            float layerGain = group.Layer?.Gain(mus.Version) ?? 1f, subLayerGain = group.SubLayer?.Gain(mus.Version) ?? 1f;
-            foreach (var clip in group.Clips.Where(c => ConditionOn(p.ClipConditions, c.Condition)))
-                StartVoice(clip, layerGain, started);
-            if (PlaySubClips)
-                foreach (var clip in group.SubClips)
-                    StartVoice(clip, subLayerGain, started);
+            foreach (var clip in play.Clips) StartClip(clip, false, play.MainVolume, started);
+            foreach (var clip in play.SubClips) StartClip(clip, true, play.SubVolume, started);
         }
 
         Events.Enqueue(new SlotInfo(part, section, phrase, sec.Phrases.Count, bar, barList.Count,
@@ -293,18 +402,57 @@ public sealed class MusEngine
         PrefetchNext();
     }
 
-    bool ConditionOn(List<MusCondition> conds, int index)
+    /// <summary>
+    /// The condition part of a clip's gain, as the game computes it: 1.0 when the condition is met, else the
+    /// condition's own off-gain (0 in shipped files). Met: the battle state allows it, and it is Normal/Hero/Pinch/Pse
+    /// or an enabled name, and for a random group the group's current pick.
+    /// Null when the condition entry does not exist; the game skips such clips.
+    /// </summary>
+    float? ConditionGain(int partIndex, bool sub, int index)
     {
-        if (index >= conds.Count) return true;
-        lock (EnabledConditions) return EnabledConditions.Contains(conds[index].Name);
+        var list = sub ? mus.Parts[partIndex].SubClipConditions : mus.Parts[partIndex].ClipConditions;
+        if (index >= list.Count) return null;
+        return Met(partIndex, sub, index) ? 1f : MusPlayback.OffGain(list[index]);
     }
 
-    void StartVoice(MusClip clip, float layerGain, List<string> started)
+    bool Met(int partIndex, bool sub, int index)
     {
-        if (clip.File.Length == 0) return; // legacy placeholder clips have no file
+        var p = mus.Parts[partIndex];
+        var list = sub ? p.SubClipConditions : p.ClipConditions;
+        if (index >= list.Count) return false;
+        var cond = list[index];
+        if (MusSerializer.IsNgs(mus.Version)) return NgsMet(partIndex, sub, index, cond);
+        if (!MusPlayback.BattleAllows(cond.Name, Battle, sub, p, MusPlayback.Flags(mus))) return false;
+        if (MusPlayback.VariantIndex(cond.Name) is var variant and >= 0)
+        {
+            if (variant != Variant) return false;
+        }
+        else if (!MusPlayback.IsBattleCondition(cond.Name))
+            lock (EnabledConditions)
+                if (!EnabledConditions.Contains(cond.Name)) return false;
+        var g = randomGroups.Find(g => g.Part == partIndex && g.Sub == sub && g.Name == cond.Name);
+        return g == null || g.Current == index;
+    }
+
+    /// <summary>NGS: an enabled condition, and for a random group its current pick. No classic rules.</summary>
+    bool NgsMet(int partIndex, bool sub, int index, MusCondition cond)
+    {
+        lock (EnabledConditions)
+            if (!EnabledConditions.Contains(cond.Name)) return false;
+        // NGS groups are numbered in the file, so the entry's own group is the one containing its index.
+        var g = randomGroups.Find(g => g.Part == partIndex && g.Sub == sub && g.Entries.Contains(index));
+        return g == null || g.Current == index;
+    }
+
+    /// <summary>Game gain: condition gain x list volume x clip volume; clips below the game's minimum are not started.</summary>
+    void StartClip(MusPlayback.PlayClip clip, bool sub, int listVolume, List<string> started)
+    {
+        if (!clip.Plays || ConditionGain(part, sub, clip.Condition) is not { } conditionGain) return;
+        float gain = ApplyClipVolume ? conditionGain * listVolume / 100f * clip.Volume / 100f : conditionGain;
+        if (gain < MusPlayback.MinimumGain) return;
         var samples = library.Get(clip.File);
         if (samples == null) return;
-        voices.Add(new Voice(samples, ApplyClipVolume ? clip.Volume / 100f * layerGain : 1f));
+        voices.Add(new Voice(samples, gain));
         started.Add(clip.File);
     }
 
@@ -324,6 +472,15 @@ public sealed class MusEngine
     void Advance()
     {
         var sections = mus.Parts[part].Sections;
+        // NGS: the bar's next clip group gets the next slot before the bar advances.
+        if (MusPlayback.Ngs.GroupsInSequence(mus.Version) && bar >= 0 && phrase < sections[section].Phrases.Count
+            && bar < sections[section].Phrases[phrase].Bars.Count
+            && step + 1 < sections[section].Phrases[phrase].Bars[bar].Variations.Count)
+        {
+            step++;
+            return;
+        }
+        step = 0;
         bar++;
         for (int guard = 0; guard < 4096; guard++)
         {
@@ -343,10 +500,10 @@ public sealed class MusEngine
     void PrefetchNext()
     {
         if (pending is { } t) PrefetchSlot(t.part, t.section, 0, 0);
-        var saved = (part, section, phrase, bar);
+        var saved = (part, section, phrase, bar, step);
         Advance();
         PrefetchSlot(part, section, phrase, bar);
-        (part, section, phrase, bar) = saved;
+        (part, section, phrase, bar, step) = saved;
     }
 
     void PrefetchSlot(int p, int s, int h, int b)
@@ -354,7 +511,7 @@ public sealed class MusEngine
         var sec = mus.Parts[p].Sections[s];
         if (h >= sec.Phrases.Count || b >= sec.Phrases[h].Bars.Count) return;
         foreach (var g in sec.Phrases[h].Bars[b].Variations)
-            foreach (var c in g.Clips.Concat(PlaySubClips ? g.SubClips : []))
+            foreach (var c in MusPlayback.Group(mus.Version, g) is var play ? play.Clips.Concat(play.SubClips).Where(c => c.Plays) : [])
                 library.Prefetch(c.File);
     }
 }
