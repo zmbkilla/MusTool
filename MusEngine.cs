@@ -492,6 +492,13 @@ public sealed class MusEngine
             {
                 phrase = 0;
                 if (sec.Type == 0 && section + 1 < sections.Count) section++;
+                else if (sec.Type == 1)
+                {
+                    // Main sections play in order like the intro; after the last one, back to the first.
+                    int next = section + 1 < sections.Count && sections[section + 1].Type == 1 ? section + 1
+                        : sections.FindIndex(s => s.Type == 1);
+                    if (next >= 0) section = next;
+                }
                 else if (sec.Phrases.All(h => h.Bars.Count == 0)) return; // empty section: stay put, slots are silent
             }
         }
