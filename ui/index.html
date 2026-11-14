@@ -111,6 +111,14 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .kbd { color: var(--dim); font-size: 11px; line-height: 1.7; }
 .kbd kbd { font: 10px Consolas, monospace; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; background: var(--panel2); }
 .spinner { color: var(--dim); }
+.scan { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; z-index: 50; }
+.scan[hidden] { display: none; }
+.scan .box { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 20px 24px; width: 420px; max-width: calc(100vw - 32px); }
+.scan h3 { margin: 0 0 6px; font-size: 15px; }
+.scan p { margin: 0 0 12px; color: var(--dim); font-size: 12px; line-height: 1.5; }
+.scan .track { height: 8px; background: var(--panel2); border-radius: 4px; overflow: hidden; }
+.scan .fill { height: 100%; width: 0; background: var(--accent, #4a9eff); transition: width .2s; }
+.scan .num { margin-top: 8px; font-size: 12px; color: var(--dim); display: flex; justify-content: space-between; }
 </style>
 </head>
 <body>
@@ -206,12 +214,21 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
   </aside>
 </div>
 <div class="toast" id="toast"></div>
+<div class="scan" id="scan" hidden>
+  <div class="box">
+    <h3>Finding NGS songs…</h3>
+    <p id="scanText">MusTool is looking through the game's NGS data for songs. This happens once per data folder.
+      You can close MusTool at any time: what has been found is kept, and the search continues next time.</p>
+    <div class="track"><div class="fill" id="scanFill"></div></div>
+    <div class="num"><span id="scanPct">0%</span><span id="scanSongs"></span></div>
+  </div>
+</div>
 
 <script>
 const TYPES = { 0: ["Intro", "--t0"], 1: ["Main", "--t1"], 2: ["Outro", "--t2"], 3: ["Special", "--t3"], 4: ["Clear jingle", "--t4"], 8: ["Silence", "--t8"], 9: ["Campship", "--t9"] };
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const short = n => n.replace(/^mu_11_bgm(02)?_?/, "");
+const short = n => n.replace(/^mu_11_bgm(0[0-9])?_?/, "");
 const typeOf = t => TYPES[t] || ["Type " + t, "--t8"];
 
 let songs = [], song = null, songName = null, viewPart = 0, selSection = 0, status = null, switchNow = false, enabled = new Set(), lastDetailKey = "";
@@ -228,9 +245,26 @@ function handle(m) {
   else if (m.type === "loading") { $("title").innerHTML = `<span class="spinner">Loading ${esc(short(m.song))}…</span>`; }
   else if (m.type === "song") onSong(m);
   else if (m.type === "versions") onVersions(m);
+  else if (m.type === "ngsScan") onNgsScan(m);
   else if (m.type === "status") onStatus(m);
   else if (m.type === "log") log(m.text, "wr");
   else if (m.type === "error") toast(m.message);
+}
+
+// Background NGS song search (first run per data folder): modal progress until it finishes.
+function onNgsScan(m) {
+  if (m.finished) {
+    $("scan").hidden = true;
+    if (m.error) toast(`Could not finish finding NGS songs: ${m.error}`);
+    else log(`found ${m.songs} NGS songs`);
+    return;
+  }
+  $("scan").hidden = false;
+  if (m.resumed) $("scanText").textContent = "Continuing the search for NGS songs from where it stopped last time. You can close MusTool at any time; what has been found is kept.";
+  const pct = m.total ? Math.floor(m.done * 100 / m.total) : 0;
+  $("scanFill").style.width = pct + "%";
+  $("scanPct").textContent = pct + "%";
+  $("scanSongs").textContent = m.songs ? `${m.songs} songs found` : "";
 }
 
 function toast(text) {
@@ -277,9 +311,9 @@ $("kindFilter").addEventListener("change", () => { renderVersionFilter(); render
 function renderSongs() {
   const q = $("search").value.trim().toLowerCase();
   const ver = $("verFilter").value, kind = $("kindFilter").value;
-  $("songs").innerHTML = songs.filter(s => s.kind === kind && (!q || s.name.toLowerCase().includes(q)) && (!ver || versions[s.name] === ver)).map(s =>
+  $("songs").innerHTML = songs.filter(s => s.kind === kind && (!q || (s.name + " " + (s.label ?? "")).toLowerCase().includes(q)) && (!ver || versions[s.name] === ver)).map(s =>
     `<div class="song${s.present ? "" : " absent"}${s.name === songName ? " active" : ""}" data-song="${esc(s.name)}" title="${esc(s.name)}${versions[s.name] ? " · v" + esc(versions[s.name]) : ""}">
-       <span>${esc(short(s.name))}</span>${s.present ? (versions[s.name] ? `<small>${esc(versions[s.name].replace("0x", "v"))}</small>` : "") : "<small>missing</small>"}</div>`).join("");
+       <span>${esc(s.label ?? short(s.name))}</span>${s.present ? (versions[s.name] ? `<small>${esc(versions[s.name].replace("0x", "v"))}</small>` : "") : "<small>missing</small>"}</div>`).join("");
 }
 
 $("songs").addEventListener("click", e => {

@@ -25,6 +25,9 @@ public sealed class UiHost : IDisposable
     MusEngine? engine;
     MusFile? mus;
     int versionScan; // bumped when the data folder changes; stops an older background version read
+    volatile bool ngsScanning; // NGS index being built (see ScanNgsIfNeeded)
+    CancellationTokenSource? ngsScanCancel;
+    Task? ngsScanTask;
     float volume = 0.8f;
     Timer? statusTimer;
 
@@ -63,6 +66,7 @@ public sealed class UiHost : IDisposable
             .SetContextMenuEnabled(false)
             .SetTemporaryFilesPath(Path.Combine(Path.GetTempPath(), "MusTool.WebView2"))
             .RegisterWebMessageReceivedHandler((_, message) => OnMessage(message))
+            .RegisterWindowClosingHandler((_, _) => { StopNgsScan(); return false; })
             .LoadRawString(LoadPage());
         statusTimer = new Timer(_ => PushStatus(), null, 250, 100);
     }
@@ -93,6 +97,7 @@ public sealed class UiHost : IDisposable
             {
                 case "ready":
                     SendInit();
+                    ScanNgsIfNeeded();
                     if (startSong != null) OnMessage(JsonSerializer.Serialize(new { type = "open", song = startSong }));
                     break;
                 case "jsError": Console.Error.WriteLine($"ui script error: {(string?)m!["message"]}"); break;
@@ -159,8 +164,10 @@ public sealed class UiHost : IDisposable
             type = "init",
             dataFolder = dir,
             // kind: "classic" (win32) or "ngs" (win32reboot); the page lists one kind at a time.
-            songs = GameData.KnownSongs.Select(s => (s, kind: "classic")).Concat(GameData.KnownNgsSongs.Select(s => (s, kind: "ngs")))
-                .Select(x => new { name = x.s, x.kind, present = dir != null && GameData.FindIce(x.s, dir) != null }),
+            // NGS: the ngsscan index (unmatched songs by hash, labelled with their .mus name) plus listed names.
+            songs = GameData.KnownSongs.Select(s => (name: s, label: (string?)null, kind: "classic"))
+                .Concat(GameData.NgsSongList().Select(x => (name: x.Name, label: x.Label, kind: "ngs")))
+                .Select(x => new { x.name, x.label, x.kind, present = dir != null && GameData.FindSong(x.name, dir) != null }),
         });
         ReadVersions(dir);
     }
@@ -173,14 +180,14 @@ public sealed class UiHost : IDisposable
     {
         int scan = Interlocked.Increment(ref versionScan);
         if (dir == null) return;
-        var present = GameData.KnownSongs.Concat(GameData.KnownNgsSongs).Where(s => GameData.FindIce(s, dir) != null).ToList();
+        var present = GameData.KnownSongs.Concat(GameData.NgsSongList().Select(x => x.Name)).Where(s => GameData.FindSong(s, dir) != null).ToList();
         Task.Run(() =>
         {
             var batch = new Dictionary<string, string>();
             foreach (var song in present)
             {
                 if (scan != Volatile.Read(ref versionScan)) return;
-                try { batch[song] = $"0x{MusSerializer.Read(GameData.LoadIce(GameData.FindIce(song, dir)!, song).MusBytes).Version:X2}"; }
+                try { batch[song] = $"0x{MusSerializer.Read(GameData.LoadIce(GameData.FindSong(song, dir)!, song.Length == 32 ? null : song).MusBytes).Version:X2}"; }
                 catch { batch[song] = "error"; }
                 if (batch.Count >= 20) Flush();
             }
@@ -195,6 +202,47 @@ public sealed class UiHost : IDisposable
         });
     }
 
+    /// <summary>
+    /// Builds the NGS song index in the background when NGS folders exist but there is no index for this data
+    /// folder (first run, or the folder changed), so users never need the ngsscan command. The page shows a modal
+    /// progress bar; the list refreshes when it is done.
+    /// </summary>
+    void ScanNgsIfNeeded()
+    {
+        if (ngsScanning || !GameData.NgsIndexNeeded()) return;
+        ngsScanning = true;
+        ngsScanCancel = new CancellationTokenSource();
+        var cancel = ngsScanCancel.Token;
+        Send(new { type = "ngsScan", done = 0, total = 0, resumed = GameData.NgsIndexPartial });
+        ngsScanTask = Task.Run(() =>
+        {
+            try
+            {
+                var list = GameData.ScanReboot((done, total, songs) => Send(new { type = "ngsScan", done, total, songs }), cancel);
+                ngsScanning = false;
+                if (cancel.IsCancellationRequested) return; // closing: what was found is saved, the next start resumes
+                Send(new { type = "ngsScan", finished = true, songs = list.Count });
+                SendInit();
+            }
+            catch (Exception e)
+            {
+                ngsScanning = false;
+                Send(new { type = "ngsScan", finished = true, error = e.Message });
+            }
+        });
+    }
+
+    /// <summary>
+    /// Closing during the scan: stop it and give it a moment to save. The index is saved after every hash folder,
+    /// so at most the folder in progress is lost; the next start resumes from there.
+    /// </summary>
+    void StopNgsScan()
+    {
+        if (!ngsScanning || ngsScanCancel == null) return;
+        ngsScanCancel.Cancel();
+        ngsScanTask?.Wait(TimeSpan.FromSeconds(5));
+    }
+
     void BrowseData()
     {
         string? start = GameData.DataFolder is { } d && Directory.Exists(d) ? d : null;
@@ -202,6 +250,7 @@ public sealed class UiHost : IDisposable
         if (picked is not [var dir, ..] || string.IsNullOrEmpty(dir)) return;
         GameData.DataFolder = dir;
         SendInit();
+        ScanNgsIfNeeded();
     }
 
     void OpenFile()

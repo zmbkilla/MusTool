@@ -61,6 +61,47 @@ try
             return 0;
         }
 
+        case "ngsscan" when args.Length == 1:
+        {
+            // ngsscan: find every NGS .mus in win32reboot(_na), match file hashes to known song names, save the index
+            // (%APPDATA%\MusTool\ngs_index.txt) that the UI's NGS list uses. Reads in memory; nothing is extracted.
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var list = GameData.ScanReboot((done, total, songs) =>
+            {
+                if (done % 32 == 0 || done == total) Console.WriteLine($"  {done}/{total} folders, {songs} songs ({sw.Elapsed:mm\\:ss})");
+            });
+            foreach (var g in list.GroupBy(e => e.Version).OrderBy(g => g.Key))
+                Console.WriteLine($"version {g.Key}: {g.Count()} songs ({g.Count(e => e.Name != null)} matched)");
+            Console.WriteLine($"\nUnmatched ({list.Count(e => e.Name == null)}):");
+            foreach (var e in list.Where(e => e.Name == null)) Console.WriteLine($"  {e.Hash}  {e.Version}  {e.Inner}");
+            return 0;
+        }
+
+        case "cpk" when args.Length == 2:
+        {
+            // cpk <song> --ice: every sound file in the song's CPKs, with the ones its .mus never references listed
+            // separately (data the song ships but does not play, e.g. a battle loop no section points at).
+            var (mus, song) = GameData.Open(args[1], true);
+            var cpks = GameData.SongCpks(mus, song!);
+            if (cpks.Count == 0) { Console.WriteLine($"{song!.Song}: no CPK found"); return 1; }
+            var referenced = GameData.ReferencedClips(mus).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var unreferenced = new List<(string file, string cpk)>();
+            int total = 0, used = 0;
+            foreach (var path in cpks)
+            {
+                using var cpk = new CpkArchive(path);
+                var names = cpk.FileNames.Order(StringComparer.OrdinalIgnoreCase).ToList();
+                int hits = names.Count(referenced.Contains);
+                Console.WriteLine($"{GameData.SongForCpk(path),-40} {names.Count,5} files, {hits,5} referenced");
+                total += names.Count; used += hits;
+                unreferenced.AddRange(names.Where(n => !referenced.Contains(n)).Select(n => (n, GameData.SongForCpk(path))));
+            }
+            Console.WriteLine($"\nReferenced by the .mus: {used} of {total} files");
+            Console.WriteLine($"\nUnreferenced ({unreferenced.Count}):");
+            foreach (var (file, cpk) in unreferenced) Console.WriteLine($"  {file,-48} {cpk}");
+            return 0;
+        }
+
         case "clips" when args.Length == 2:
             foreach (var name in AllClips(Open(args[1])).Select(c => c.File).Distinct().Order())
                 Console.WriteLine(name);
@@ -268,6 +309,10 @@ static int Usage()
         MusTool - PSO2 .mus (adaptive BGM) editor
 
           info     <file.mus> [--section P.S]         print the part/section/phrase tree, or one section's bars
+          ngsscan                                     find every NGS .mus in win32reboot, match hashes to song names,
+                                                      save the list the UI uses (unmatched songs listed by hash)
+          cpk      <song>                             every sound file in the song's CPKs; files the .mus never
+                                                      references are listed separately
           clips    <file.mus> [--check]               list every referenced .hca file (--check: with --ice, list
                                                       the ones missing from the song's CPK)
           export   <file.mus> [out.json]              convert to editable JSON

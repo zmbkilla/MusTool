@@ -187,6 +187,25 @@ public static class GameData
         return found;
     }
 
+    /// <summary>
+    /// Every CPK that belongs to a song, whether or not it supplies a referenced clip: its own CPK, for NGS the
+    /// CPKs named in its root and its base (_md-less) name, plus any CPK found holding its clips.
+    /// </summary>
+    public static List<string> SongCpks(MusFile mus, IceSong song)
+    {
+        var list = new List<string>();
+        if (song.CpkPath != null) list.Add(song.CpkPath);
+        if (IsRebootPath(song.IcePath))
+        {
+            string? root = RootOf(song.IcePath);
+            string baseName = song.Song.EndsWith("_md", StringComparison.OrdinalIgnoreCase) ? song.Song[..^3] : song.Song;
+            foreach (var name in LinkedCpkNames(mus).Append(baseName))
+                if (FindReboot(CpkHash(name), root) is { } p) list.Add(p);
+        }
+        list.AddRange(ClipSources(mus, song, out _));
+        return list.Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
     public static List<string> ReferencedClips(MusFile mus) =>
         mus.Parts.SelectMany(p => p.Sections).SelectMany(s => s.Phrases).SelectMany(h => h.Bars)
            .SelectMany(b => b.Variations).SelectMany(g => g.Clips.Concat(g.SubClips)).Select(c => c.File)
@@ -287,6 +306,22 @@ public static class GameData
     public static string? FindReboot(string hash, string? folder = null) =>
         RebootFolders(folder).Select(f => RebootPath(f, hash)).FirstOrDefault(File.Exists);
 
+    /// <summary>A song by name, or by its 32-character ice hash (unmatched NGS songs from the index). Null when absent.</summary>
+    public static string? FindSong(string nameOrHash, string? folder = null) =>
+        nameOrHash.Length == 32 && nameOrHash.All(Uri.IsHexDigit)
+            ? FindClassic(nameOrHash.ToLowerInvariant(), folder) ?? FindReboot(nameOrHash.ToLowerInvariant(), folder)
+            : FindIce(nameOrHash, folder);
+
+    /// <summary>NGS songs for the song list: the index from ngsscan when there is one (matched names, then unmatched
+    /// hashes labelled with their .mus name), plus listed names the index lacks.</summary>
+    public static List<(string Name, string? Label)> NgsSongList()
+    {
+        var list = NgsIndex.Select(e => (Name: e.Name ?? e.Hash, Label: e.Name == null ? $"{e.Inner} (unmatched)" : null)).ToList();
+        var have = list.Select(x => x.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        list.AddRange(KnownNgsSongs.Where(s => !have.Contains(s)).Select(s => (s, (string?)null)));
+        return list;
+    }
+
     /// <summary>A song's ice: classic folders first, then NGS ones. Null when absent.</summary>
     public static string? FindIce(string song, string? folder = null) =>
         FindClassic(IceHash(song), folder) ?? FindReboot(IceHash(song), folder);
@@ -304,6 +339,128 @@ public static class GameData
     {
         string dir = Path.GetDirectoryName(Path.GetFullPath(archivePath))!;
         return DataRoot(IsRebootPath(archivePath) ? Path.GetDirectoryName(dir) : dir);
+    }
+
+    // ---------------------------------------------------------------- NGS song index (ngsscan)
+
+    /// <summary>
+    /// One NGS .mus found by <see cref="ScanReboot"/>. Name is the song name whose md5 matches the file's hash, or
+    /// null when no known name matches; such songs are opened by Hash directly.
+    /// </summary>
+    public sealed record NgsIndexEntry(string Hash, string? Name, string Inner, string Version);
+
+    /// <summary>The scan result, kept per user in %APPDATA%\MusTool (it describes the user's game data, so it
+    /// is not shipped with the program).</summary>
+    static string NgsIndexPath => Path.Combine(Path.GetDirectoryName(ConfigPath)!, "ngs_index.txt");
+
+    public static IReadOnlyList<NgsIndexEntry> NgsIndex { get; private set; } = LoadNgsIndex();
+
+    /// <summary>The data folder (pso2_bin/data) the saved index was made from; null when there is none.</summary>
+    public static string? NgsIndexRoot { get; private set; }
+
+    /// <summary>Hash folders ("win32reboot/f5") already scanned when the saved index is partial; empty when complete.</summary>
+    static HashSet<string> ngsIndexDone = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The saved index is unfinished (the scan was stopped, e.g. by closing MusTool); scanning resumes it.</summary>
+    public static bool NgsIndexPartial { get; private set; }
+
+    /// <summary>
+    /// True when the NGS index should be built or finished: NGS folders exist and there is no complete index for
+    /// this data folder. The UI then scans in the background, so users never need to run ngsscan themselves.
+    /// </summary>
+    public static bool NgsIndexNeeded(string? folder = null) =>
+        RebootFolders(folder).Any() && (NgsIndexRoot == null || NgsIndexPartial
+            || !string.Equals(NgsIndexRoot, DataRoot(folder), StringComparison.OrdinalIgnoreCase));
+
+    static List<NgsIndexEntry> LoadNgsIndex()
+    {
+        try
+        {
+            var lines = File.ReadAllLines(NgsIndexPath);
+            NgsIndexRoot = lines.FirstOrDefault(l => l.StartsWith("# root\t"))?[7..];
+            var partial = lines.FirstOrDefault(l => l.StartsWith("# partial\t"));
+            NgsIndexPartial = partial != null;
+            ngsIndexDone = new HashSet<string>(partial?[10..].Split(',', StringSplitOptions.RemoveEmptyEntries) ?? [], StringComparer.OrdinalIgnoreCase);
+            return lines.Where(l => !l.StartsWith('#')).Select(l => l.Split('\t')).Where(f => f.Length == 4)
+                .Select(f => new NgsIndexEntry(f[0], f[1].Length > 0 ? f[1] : null, f[2], f[3])).ToList();
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return []; }
+    }
+
+    static void SaveNgsIndex(string? root, IEnumerable<NgsIndexEntry> entries, IReadOnlyCollection<string>? doneFolders)
+    {
+        var list = entries.OrderBy(e => e.Name ?? "~" + e.Inner, StringComparer.OrdinalIgnoreCase).ToList();
+        var header = new List<string> { $"# root\t{root}" };
+        if (doneFolders != null) header.Add($"# partial\t{string.Join(",", doneFolders)}");
+        Directory.CreateDirectory(Path.GetDirectoryName(NgsIndexPath)!);
+        string tmp = NgsIndexPath + ".tmp"; // write then swap, so a close mid-write never leaves a broken index
+        File.WriteAllLines(tmp, header.Concat(list.Select(e => $"{e.Hash}\t{e.Name}\t{e.Inner}\t{e.Version}")));
+        File.Move(tmp, NgsIndexPath, overwrite: true);
+        NgsIndex = list;
+        NgsIndexRoot = root;
+        NgsIndexPartial = doneFolders != null;
+        ngsIndexDone = new HashSet<string>(doneFolders ?? [], StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Opens every ice in the NGS folders (in memory) and records the ones holding a .mus: its hash, version, inner
+    /// name, and the known song name whose md5 equals the hash (list names, their _md-less forms, and the .mus's
+    /// own name). Works through the hash folders in order and saves after each one, so stopping (closing MusTool)
+    /// keeps everything found so far and the next scan resumes with the remaining folders.
+    /// </summary>
+    public static List<NgsIndexEntry> ScanReboot(Action<int, int, int>? progress = null, CancellationToken cancel = default)
+    {
+        string? root = DataRoot();
+        bool resume = NgsIndexPartial && string.Equals(NgsIndexRoot, root, StringComparison.OrdinalIgnoreCase);
+        var doneFolders = resume ? new List<string>(ngsIndexDone) : new List<string>();
+        var found = new System.Collections.Concurrent.ConcurrentDictionary<string, NgsIndexEntry>(
+            resume ? NgsIndex.Select(e => KeyValuePair.Create(e.Hash, e)) : [], StringComparer.OrdinalIgnoreCase);
+
+        var folders = RebootFolders()
+            .SelectMany(f => Directory.EnumerateDirectories(f).Select(d => (key: $"{Path.GetFileName(f)}/{Path.GetFileName(d)}", dir: d)))
+            .OrderBy(x => x.key, StringComparer.OrdinalIgnoreCase).ToList();
+        var byHash = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var name in KnownNgsSongs.SelectMany(s => new[] { s, s.EndsWith("_md") ? s[..^3] : s + "_md" }))
+            byHash.TryAdd(IceHash(name), name);
+
+        var options = new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount / 2) };
+        int total = folders.Count, finished = folders.Count(f => doneFolders.Contains(f.key, StringComparer.OrdinalIgnoreCase));
+        foreach (var (key, dir) in folders)
+        {
+            if (doneFolders.Contains(key, StringComparer.OrdinalIgnoreCase)) continue;
+            if (cancel.IsCancellationRequested) break;
+            Parallel.ForEach(Directory.EnumerateFiles(dir), options, path =>
+            {
+                if (cancel.IsCancellationRequested) return;
+                try
+                {
+                    using (var fs = File.OpenRead(path))
+                    {
+                        Span<byte> magic = stackalloc byte[4];
+                        if (fs.Read(magic) < 4 || magic[0] != (byte)'I' || magic[1] != (byte)'C' || magic[2] != (byte)'E' || magic[3] != 0) return;
+                    }
+                    string hash = Path.GetFileName(dir) + Path.GetFileName(path);
+                    if (found.ContainsKey(hash)) return; // win32reboot_na copy already seen
+                    var ice = LoadIce(path, byHash.GetValueOrDefault(hash)); // throws when the ice holds no .mus
+                    string inner = ice.Song;
+                    byte version = ice.MusBytes.Length > 0x20 ? MusSerializer.Read(ice.MusBytes).Version : (byte)0;
+                    string? name = byHash.GetValueOrDefault(hash);
+                    if (name == null)
+                        foreach (var guess in new[] { inner, "mu_" + inner, "mu_11_bgm02_" + inner })
+                            if (IceHash(guess).Equals(hash, StringComparison.OrdinalIgnoreCase)) { name = guess; break; }
+                    found.TryAdd(hash, new NgsIndexEntry(hash, name, inner, $"0x{version:X2}"));
+                }
+                catch (Exception) { } // not a song ice, or unreadable: skipped
+            });
+            if (cancel.IsCancellationRequested) break; // this folder is incomplete: not marked done, rescanned next time
+            doneFolders.Add(key);
+            SaveNgsIndex(root, found.Values, doneFolders);
+            progress?.Invoke(++finished, total, found.Count);
+        }
+
+        bool complete = folders.All(f => doneFolders.Contains(f.key, StringComparer.OrdinalIgnoreCase));
+        SaveNgsIndex(root, found.Values, complete ? null : doneFolders);
+        return NgsIndex.ToList();
     }
 
     /// <summary>Reads a .mus either from a plain file or, with ice=true, from an ice resolved via <see cref="ResolveIce"/>.</summary>
